@@ -180,9 +180,10 @@ atomically below `tmp` and moved without a second encoding into the applicable
 txt2img or img2img run folder when individual images are retained.
 
 **CAUTION:** **Matrix only** permanently deletes individual LoRA test images only
-after every matrix page has been written and validated. If generation is interrupted,
-matrix creation fails, a page is missing or empty, or deletion fails, source files
-and a recovery manifest are retained.
+after every requested cell has completed and every matrix page has been written and
+validated. If generation is interrupted, matrix creation fails, a page is missing or
+empty, or deletion fails, source files and a recovery manifest are retained. This also
+applies when LoRA Tester can still build a valid partial matrix after an interruption.
 
 If Forge's **Save grids** option is enabled, matrix pages are saved in Forge's normal
 grid output directory and format. Otherwise, gallery pages remain in the run's
@@ -208,6 +209,18 @@ returned as recovery output and the recovery location is logged.
 - Use `start:end:step`, for example `-1:1:0.25`.
 - The step must not be zero.
 - Keep each range at or below 100 values.
+- Per-LoRA settings accept either Min alone, all of Min/Max/Step, or three blank
+  fields. Incomplete rows block generation and identify the affected LoRA in the UI
+  and console instead of silently using another value.
+
+## Known limitations in v0.1.0 beta
+
+- Adaptive RAM protection is visible but intentionally disabled while universal
+  thresholds are evaluated. Disk spooling and optional model unloading remain active.
+- **Matrix Image Margin** controls spacing between matrix rows. Horizontal cell
+  spacing currently applies only when **Draw Legend in Matrix Grid** is enabled.
+- When model unloading is enabled, saved matrix grids currently use the Forge grid
+  output root instead of Forge's date subfolder layout.
 
 ## Privacy and security
 

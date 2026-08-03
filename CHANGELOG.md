@@ -14,6 +14,9 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ### Fixed
 
 - Made trigger positioning explicit: Start places triggers before the prompt, while End places them after the LoRA tag.
+- Retained Matrix-only source images after an interrupted or otherwise incomplete generation, even when a valid partial matrix can still be created.
+- Blocked incomplete or invalid per-LoRA weight settings with a visible explanation instead of silently falling back to global weights.
+- Prevented the LoRA settings table from repeatedly reclaiming focus while the user scrolls or moves to another control.
 
 ### Added
 

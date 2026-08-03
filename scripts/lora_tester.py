@@ -359,6 +359,34 @@ class LoRaTesterScript(scripts.Script):
 
         return values
 
+    @staticmethod
+    def _block_generation(p, message):
+        """Stop a LoRA Tester run while keeping the reason visible to the user."""
+
+        print(f"[LoRA Tester] Generation blocked: {message}")
+        try:
+            gr.Warning(message)
+        except Exception:
+            pass
+        shared.state.textinfo = message
+        shared.state.interrupted = True
+        p.do_not_save_grid = True
+
+    @staticmethod
+    def _matrix_only_cleanup_decision(state, completed_count, interrupted):
+        """Allow destructive cleanup only after every requested cell completed."""
+
+        expected_count = len(state.get('cases', []))
+        if completed_count != expected_count:
+            return False, (
+                f"generation completed {completed_count} of {expected_count} requested cells"
+            )
+        if interrupted:
+            return False, "generation was interrupted"
+        if state.get('ram_stop_reason'):
+            return False, str(state['ram_stop_reason'])
+        return True, None
+
     def _build_lora_settings_rows(self, selected_loras, current_settings=None):
         """Build editable trigger/weight rows while preserving user edits."""
         existing = {
@@ -811,6 +839,17 @@ class LoRaTesterScript(scripts.Script):
             'individual_images_finalized': state.get('individual_images_finalized', 0),
             'individual_finalize_error': state.get('individual_finalize_error'),
             'individual_finalize_failures': state.get('individual_finalize_failures', 0),
+            'expected_cell_count': len(state.get('cases', [])),
+            'completed_cell_count': len(cells),
+            'generation_interrupted': state.get('generation_interrupted', False),
+            'matrix_only_delete_allowed': state.get(
+                'matrix_only_delete_allowed',
+                False,
+            ),
+            'matrix_only_retention_reason': state.get(
+                'matrix_only_retention_reason'
+            ),
+            'recovery_retained': state.get('recovery_retained', False),
             'cleanup_incomplete': state.get('cleanup_incomplete', False),
             'model_unload_attempted': state.get('model_unload_attempted', False),
             'model_unloaded': state.get('model_unloaded', False),
@@ -1229,14 +1268,7 @@ class LoRaTesterScript(scripts.Script):
                 "LoRA Tester is enabled, but no LoRA is selected. "
                 "Select at least one LoRA or disable LoRA Tester before generating."
             )
-            print(f"[LoRA Tester] Generation blocked: {message}")
-            try:
-                gr.Warning(message)
-            except Exception:
-                pass
-            shared.state.textinfo = message
-            shared.state.interrupted = True
-            p.do_not_save_grid = True
+            self._block_generation(p, message)
             return
 
         self._move_spool_hooks_last(p)
@@ -1245,7 +1277,18 @@ class LoRaTesterScript(scripts.Script):
         if not self.cached_loras:
             self.cached_loras = LoRaMetadataReader.find_all_loras()
 
-        global_weights = self._parse_weight_spec(global_weight_spec, "global") or [1.0]
+        global_weight_text = self._cell_text(global_weight_spec)
+        if global_weight_text:
+            global_weights = self._parse_weight_spec(global_weight_text, "global")
+            if global_weights is None:
+                self._block_generation(
+                    p,
+                    "The global weight is invalid. Enter one number or an inclusive "
+                    "Min:Max:Step range (for example -1:1:0.25).",
+                )
+                return
+        else:
+            global_weights = [1.0]
         settings_by_lora = {
             str(row[0]): row
             for row in self._coerce_settings_rows(lora_settings)
@@ -1292,16 +1335,34 @@ class LoRaTesterScript(scripts.Script):
                 if not minimum and not maximum and not step:
                     weights = global_weights
                 elif minimum and not maximum and not step:
-                    weights = self._parse_weight_spec(minimum, lora_path) or global_weights
+                    weights = self._parse_weight_spec(minimum, lora_path)
+                    if weights is None:
+                        self._block_generation(
+                            p,
+                            f"The individual weight for '{lora_path}' is invalid. "
+                            "Enter one number in Min / single weight, or leave all "
+                            "three weight fields blank to use the global value.",
+                        )
+                        return
                 elif minimum and maximum and step:
                     weight_spec = f"{minimum}:{maximum}:{step}"
-                    weights = self._parse_weight_spec(weight_spec, lora_path) or global_weights
+                    weights = self._parse_weight_spec(weight_spec, lora_path)
+                    if weights is None:
+                        self._block_generation(
+                            p,
+                            f"The individual weight range for '{lora_path}' is invalid. "
+                            "Use finite numbers and a non-zero Step value.",
+                        )
+                        return
                 else:
-                    print(
-                        f"[LoRA Tester] Incomplete weight override for {lora_path!r}; "
-                        "fill Min, Max, and Step, or only Min for one weight. Using global weights."
+                    self._block_generation(
+                        p,
+                        f"The individual weight settings for '{lora_path}' are incomplete. "
+                        "Enter only Min / single weight for one value, fill Min, Max, "
+                        "and Step for a range, or leave all three fields blank to use "
+                        "the global value.",
                     )
-                    weights = global_weights
+                    return
 
             for weight in weights:
                 if len(cases) >= self.MAX_TOTAL_CASES:
@@ -1747,6 +1808,17 @@ class LoRaTesterScript(scripts.Script):
         try:
             self._spool_fallback_images(p, state, processed)
             cells = [state['cells'][index] for index in sorted(state['cells'])]
+            generation_interrupted = bool(
+                getattr(shared.state, 'interrupted', False)
+            )
+            delete_allowed, retention_reason = self._matrix_only_cleanup_decision(
+                state,
+                len(cells),
+                generation_interrupted,
+            )
+            state['generation_interrupted'] = generation_interrupted
+            state['matrix_only_delete_allowed'] = delete_allowed
+            state['matrix_only_retention_reason'] = retention_reason
             if not cells:
                 processed.images = []
                 processed.extra_images = []
@@ -1788,6 +1860,11 @@ class LoRaTesterScript(scripts.Script):
             processed.index_of_first_image = len(page_paths)
             if state.get('ram_stop_reason'):
                 processed.comments += f"\nLoRA Tester: {state['ram_stop_reason']}"
+            if retention_reason and not state.get('keep_individual_images'):
+                processed.comments += (
+                    "\nLoRA Tester recovery: individual source images were retained "
+                    f"because {retention_reason}."
+                )
 
             self._write_manifest(state, "complete")
             self._cleanup_spool_files(state, page_paths)
@@ -2222,18 +2299,29 @@ class LoRaTesterScript(scripts.Script):
         protected = {str(Path(path).resolve()) for path in page_paths}
         cleanup_complete = True
         if not state.get('keep_individual_images'):
-            deleted = 0
-            for cell in state.get('cells', {}).values():
-                if self._safe_unlink(cell.get('path')):
-                    deleted += 1
-                else:
-                    cleanup_complete = False
-            if cleanup_complete:
+            delete_allowed = bool(state.get('matrix_only_delete_allowed', False))
+            cells = list(state.get('cells', {}).values())
+            if delete_allowed:
+                deleted = 0
+                for cell in cells:
+                    if self._safe_unlink(cell.get('path')):
+                        deleted += 1
+                    else:
+                        cleanup_complete = False
+            elif cells:
+                state['recovery_retained'] = True
+                cleanup_complete = False
+                reason = state.get('matrix_only_retention_reason') or "the run was incomplete"
+                print(
+                    f"[LoRA Tester] Matrix-only recovery: retained {len(cells)} source "
+                    f"image(s) in {state['session_dir']} because {reason}"
+                )
+            if delete_allowed and cleanup_complete:
                 print(
                     f"[LoRA Tester] Matrix-only cleanup: deleted {deleted} individual "
-                    "image(s) after matrix validation"
+                    "image(s) after complete generation and matrix validation"
                 )
-            else:
+            elif delete_allowed:
                 print(
                     "[LoRA Tester] Warning: matrix pages are safe, but one or more "
                     "individual images could not be deleted"
@@ -2243,7 +2331,9 @@ class LoRaTesterScript(scripts.Script):
             if row_path and str(Path(row_path).resolve()) not in protected:
                 cleanup_complete = self._safe_unlink(row_path) and cleanup_complete
 
-        if cleanup_complete:
+        if state.get('recovery_retained'):
+            self._write_manifest(state, "recovery-retained")
+        elif cleanup_complete:
             self._safe_unlink(state.get('manifest_path'))
         else:
             state['cleanup_incomplete'] = True

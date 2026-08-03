@@ -101,18 +101,6 @@
         requestAnimationFrame(() => beginEditing(cell));
     }
 
-    function handleCellFocus(event) {
-        const target = eventElement(event);
-        if (!target || target.closest(EDITOR_SELECTOR)) {
-            return;
-        }
-
-        const cell = bodyCell(target);
-        if (isEditableCell(cell)) {
-            requestAnimationFrame(() => beginEditing(cell));
-        }
-    }
-
     function protectReadOnlyColumn(event) {
         const target = eventElement(event);
         const cell = bodyCell(target);
@@ -173,7 +161,6 @@
 
             root.dataset.loraTesterCaretInstalled = "true";
             root.addEventListener("click", handleCellClick);
-            root.addEventListener("focusin", handleCellFocus);
             root.addEventListener("dblclick", protectReadOnlyColumn, true);
             root.addEventListener("keydown", handleTableKeydown, true);
         }
