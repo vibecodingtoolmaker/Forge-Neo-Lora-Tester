@@ -99,7 +99,8 @@ Use the weight columns as follows:
 - `0.8 | blank | blank` uses one dedicated weight.
 - `-1 | 1 | 0.25` creates an inclusive range from -1 to 1.
 - Three blank weight cells use the global specification.
-- An incomplete combination falls back to the global value and logs a warning.
+- An incomplete combination blocks generation and identifies the affected LoRA in
+  the UI and console. Correct the row, then start generation again.
 
 One click opens an editable cell and places the caret at the beginning without
 selecting or clearing its contents. Tab, Shift+Tab, Enter, and arrow-key cell
