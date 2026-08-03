@@ -1,0 +1,27 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Changed
+
+- Temporarily disabled the adaptive RAM watchdog for the v0.1.0 release while its thresholds are evaluated further. Disk spooling and pre-matrix model unloading remain active.
+
+### Fixed
+
+- Made trigger positioning explicit: Start places triggers before the prompt, while End places them after the LoRA tag.
+
+### Added
+
+- Initial public pre-release for Forge Neo.
+- Fixed-seed LoRA and weight-range comparisons in labeled matrix pages.
+- Per-LoRA trigger-word and weight overrides.
+- Folder-scoped LoRA selection with optional subfolder inclusion.
+- Disk-spooled source images and recovery manifests.
+- Adaptive matrix-page packing and RAM protection.
+- Optional checkpoint, text-encoder, and VAE unload before matrix creation.
+- Recovery-safe matrix-only output mode.
