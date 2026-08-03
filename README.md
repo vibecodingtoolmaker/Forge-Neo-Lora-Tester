@@ -3,9 +3,9 @@
 LoRA Tester compares multiple LoRAs and weight ranges with one prompt and one
 fixed seed. It returns the results as one or more labeled, RAM-aware matrix pages.
 
-> **Project status:** v0.1.0 pre-release. The extension is being stress-tested with large
-> models and LoRA collections. Keep recoverable individual images enabled for
-> important runs.
+> **Project status:** v0.1.0-beta.1 public beta. The extension has been tested with
+> large models and LoRA collections, but known limitations remain. Keep recoverable
+> individual images enabled for important runs and please report reproducible issues.
 
 ## Welcome
 
@@ -56,7 +56,7 @@ The extension does not install or download packages by itself. The optional
 ## Installation
 
 1. Download or clone this repository into Forge Neo's `extensions` directory.
-2. Keep the repository folder name as `Forge_Neo_Lora_tester`.
+2. Keep the repository folder name as `Forge-Neo-Lora-Tester`.
 3. Restart Forge Neo.
 
 The **LoRA Tester** accordion is available in both txt2img and img2img.
@@ -233,7 +233,7 @@ returned as recovery output and the recovery location is logged.
   fields. Incomplete rows block generation and identify the affected LoRA in the UI
   and console instead of silently using another value.
 
-## Known limitations in v0.1.0 beta
+## Known limitations in v0.1.0-beta.1
 
 - Adaptive RAM protection is visible but intentionally disabled while universal
   thresholds are evaluated. Disk spooling and optional model unloading remain active.

@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.0-beta.1] - 2026-08-03
+
 ### Changed
 
 - Temporarily disabled the adaptive RAM watchdog for the v0.1.0 release while its thresholds are evaluated further. Disk spooling and pre-matrix model unloading remain active.
@@ -20,11 +22,15 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Added
 
-- Initial public pre-release for Forge Neo.
+- Initial public beta release for Forge Neo.
 - Fixed-seed LoRA and weight-range comparisons in labeled matrix pages.
 - Per-LoRA trigger-word and weight overrides.
 - Folder-scoped LoRA selection with optional subfolder inclusion.
 - Disk-spooled source images and recovery manifests.
-- Adaptive matrix-page packing and RAM protection.
+- Adaptive matrix-page packing and an experimental RAM-watchdog implementation that
+  remains disabled in this release.
 - Optional checkpoint, text-encoder, and VAE unload before matrix creation.
 - Recovery-safe matrix-only output mode.
+
+[Unreleased]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/compare/v0.1.0-beta.1...HEAD
+[0.1.0-beta.1]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/releases/tag/v0.1.0-beta.1
