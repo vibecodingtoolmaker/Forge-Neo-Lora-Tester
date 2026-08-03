@@ -56,8 +56,9 @@ The extension does not install or download packages by itself. The optional
 ## Installation
 
 1. Download or clone this repository into Forge Neo's `extensions` directory.
-2. Keep the repository folder name as `Forge-Neo-Lora-Tester`.
-3. Restart Forge Neo.
+   Alernatively go inside your Forge neo\extensions folder use git pull request: `git clone https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester.git`
+3. Keep the repository folder name as `Forge-Neo-Lora-Tester`.
+4. Restart Forge Neo.
 
 The **LoRA Tester** accordion is available in both txt2img and img2img.
 
