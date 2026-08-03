@@ -221,6 +221,11 @@ returned as recovery output and the recovery location is logged.
   spacing currently applies only when **Draw Legend in Matrix Grid** is enabled.
 - When model unloading is enabled, saved matrix grids currently use the Forge grid
   output root instead of Forge's date subfolder layout.
+- After correcting an invalid value in an actively edited per-LoRA table cell, the
+  first **Generate** click can commit the corrected cell and return focus to the table
+  without starting generation. Click **Generate** again; the corrected run then starts
+  normally. This is a Gradio table-editing usability issue and does not lose generated
+  images or settings.
 
 ## Privacy and security
 
