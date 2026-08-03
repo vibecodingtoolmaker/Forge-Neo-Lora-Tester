@@ -7,6 +7,26 @@ fixed seed. It returns the results as one or more labeled, RAM-aware matrix page
 > models and LoRA collections. Keep recoverable individual images enabled for
 > important runs.
 
+## Welcome
+
+Hello and welcome! I hope LoRA Tester makes it easier to compare large LoRA
+collections, explore useful weight ranges, and keep the results understandable in a
+single matrix. Feedback, careful testing, and constructive contributions are very
+welcome.
+
+## AI-assisted development transparency
+
+LoRA Tester is created and maintained by **vibecodingtoolmaker** with substantial
+AI-assisted development support from **OpenAI Codex**. Code, documentation, reviews,
+and test ideas have been developed and refined through this collaborative workflow —
+also known, with some affection, as *vibecoding*.
+
+The project direction, feature decisions, hands-on Forge testing, final review, and
+release responsibility remain with the human maintainer. Codex is a development tool,
+not a runtime dependency: the installed extension does not contact OpenAI or send
+prompts, images, model information, or other user data to Codex. This project is not
+affiliated with or endorsed by OpenAI.
+
 ## Features
 
 - Loads the LoRA list automatically on first activation
