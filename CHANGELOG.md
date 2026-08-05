@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.2.0-beta.1] - 2026-08-05
+
 ### Changed
 
 - Enabled the fixed-seed reference image by default and repeat it on every matrix page.
@@ -41,5 +43,6 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Optional checkpoint, text-encoder, and VAE unload before matrix creation.
 - Recovery-safe matrix-only output mode.
 
-[Unreleased]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/compare/v0.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/compare/v0.2.0-beta.1...HEAD
+[0.2.0-beta.1]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/compare/v0.1.0-beta.1...v0.2.0-beta.1
 [0.1.0-beta.1]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/releases/tag/v0.1.0-beta.1

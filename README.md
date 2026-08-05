@@ -3,9 +3,10 @@
 LoRA Tester compares multiple LoRAs and weight ranges with one prompt and one
 fixed seed. It returns the results as one or more labeled, RAM-aware matrix pages.
 
-> **Project status:** v0.1.0-beta.1 public beta. The extension has been tested with
-> large models and LoRA collections, but known limitations remain. Keep recoverable
-> individual images enabled for important runs and please report reproducible issues.
+> **Project status:** v0.2.0-beta.1 public beta. Extreme Run Mode completed a
+> 2,743-cell stress test covering 211 LoRAs with 13 weights each. Known limitations
+> remain; keep recoverable individual images enabled for important runs and please
+> report reproducible issues.
 
 ## Welcome
 
@@ -53,7 +54,7 @@ affiliated with or endorsed by OpenAI.
 - A Forge environment that provides Gradio and Pillow
 
 The extension does not install or download packages by itself. The optional
-`psutil`-based RAM watchdog is disabled for the v0.1.0 release.
+`psutil`-based RAM watchdog is disabled for the v0.2.0 release.
 
 ## Installation
 
@@ -153,9 +154,9 @@ per-iteration random-number generator before every cell so that all LoRA and wei
 combinations use the seed of the first generated image. This preserves a meaningful
 visual comparison.
 
-## Adaptive RAM protection (disabled in v0.1.0)
+## Adaptive RAM protection (disabled in v0.2.0)
 
-The adaptive RAM watchdog is intentionally disabled for the v0.1.0 release while
+The adaptive RAM watchdog is intentionally disabled for the v0.2.0 release while
 its cross-system thresholds are evaluated further. Its checkbox and budget fields
 are visible but read-only. No RAM-monitor thread is started, and the extension does
 not stop between LoRA cells based on physical-memory or Windows-commit thresholds.
@@ -168,7 +169,7 @@ The configured matrix column count remains the width of a logical row, and every
 labeled row is saved separately before the final page is composed. The maximum safe
 image-dimension fallback also remains active.
 
-For v0.1.0, the primary memory-saving mechanism is the enabled-by-default model
+For v0.2.0, the primary memory-saving mechanism is the enabled-by-default model
 unload described below. Users should still avoid matrix dimensions that exceed the
 practical RAM and image-size limits of their system.
 
@@ -244,7 +245,7 @@ returned as recovery output and the recovery location is logged.
   fields. Incomplete rows block generation and identify the affected LoRA in the UI
   and console instead of silently using another value.
 
-## Known limitations in v0.1.0-beta.1
+## Known limitations in v0.2.0-beta.1
 
 - Adaptive RAM protection is visible but intentionally disabled while universal
   thresholds are evaluated. Disk spooling and optional model unloading remain active.
