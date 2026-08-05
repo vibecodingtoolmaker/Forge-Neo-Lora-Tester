@@ -7,6 +7,15 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- Enabled the fixed-seed reference image by default and repeat it on every matrix page.
+- Raised the per-page image-dimension ceiling from 60,000 to 65,000 pixels while retaining automatic page splitting.
+
+### Added
+
+- Added an explicit Extreme Run Mode that raises the normal 500-cell limit to 10,000 cells with a long-running stability and disk-usage warning.
+
 ## [0.1.0-beta.1] - 2026-08-03
 
 ### Changed
