@@ -36,7 +36,9 @@ affiliated with or endorsed by OpenAI.
 - Supports per-LoRA trigger text and weight overrides
 - Supports positive and negative weights and inclusive ranges such as `-3:3:0.5`
 - Uses the first generated seed for every comparison cell
-- Optionally includes a baseline without a LoRA
+- Generates a fixed-seed reference image without a tested LoRA by default
+- Repeats that reference image at the top of every matrix page
+- Offers an explicit Extreme Run Mode for up to 10,000 matrix cells
 - Writes completed cells to disk instead of retaining decoded images in RAM
 - Builds labeled row strips on disk before composing the final matrix
 - Retains the adaptive RAM-protection implementation behind a disabled release switch
@@ -71,11 +73,12 @@ The **LoRA Tester** accordion is available in both txt2img and img2img.
    are included. Click **Refresh LoRA List** after adding or removing model files.
 4. Enter one global weight or range.
 5. Edit trigger words or weight overrides in the per-LoRA table if needed.
-6. Configure the baseline, trigger position, label display, matrix columns, and
-   margin.
+6. Configure the reference image, trigger position, label display, matrix columns,
+   and margin. The reference is enabled by default and repeated on every page.
 7. Choose an output-retention mode. Keeping individual images is the safe default.
 8. Keep model unloading enabled so matrix creation can use the released RAM.
-9. Generate normally. The gallery returns matrix pages rather than individual cells.
+9. Enable **Extreme Run Mode** only for deliberately large jobs above 500 cells.
+10. Generate normally. The gallery returns matrix pages rather than individual cells.
 
 Generation is blocked while LoRA Tester is enabled and no LoRA is selected.
 Disabling the accordion leaves normal Forge generation unchanged.
@@ -115,7 +118,11 @@ typing, deletion, Enter, and double-click editing.
 - Inclusive descending range: `3:-3:0.5`
 
 The syntax is `start:end:step`; direction is inferred automatically. One
-specification is limited to 100 values and one run to 500 matrix cells.
+specification is limited to 100 values. A normal run is limited to 500 matrix
+cells. **Extreme Run Mode** raises this fixed limit to 10,000 cells and must be
+enabled explicitly. Extreme runs can take many hours or days, consume very large
+amounts of temporary disk space, and may expose long-duration Forge, driver,
+model, extension, or system instability.
 
 ## Trigger metadata
 
@@ -179,7 +186,10 @@ delay.
 
 ## Output and recovery
 
-Only matrix pages are returned to the Forge gallery. **Matrix + individual images**
+Only matrix pages are returned to the Forge gallery. Pages are kept below 65,000
+pixels on either axis and split automatically when necessary. When the default
+reference generation is enabled, its fixed-seed image appears at the top of every
+page. **Matrix + individual images**
 keeps every final source cell as a lossless PNG with generation metadata. Files are
 grouped per run and use names such as:
 

@@ -222,7 +222,8 @@ class LoRaTesterScript(scripts.Script):
     PROCESSING_STATE_ATTRIBUTE = "_lora_tester_state"
     MAX_WEIGHTS_PER_LORA = 100
     MAX_TOTAL_CASES = 500
-    MAX_MATRIX_DIMENSION = 60_000
+    MAX_EXTREME_TOTAL_CASES = 10_000
+    MAX_MATRIX_DIMENSION = 65_000
     PAGE_SAFETY_FACTOR = 1.35
     LABEL_FONT_DIVISOR = 36
     LABEL_MIN_FONT_SIZE = 14
@@ -358,6 +359,16 @@ class LoRaTesterScript(scripts.Script):
             return None
 
         return values
+
+    @classmethod
+    def _maximum_total_cases(cls, extreme_run_mode):
+        """Return the explicit normal or opt-in extreme run limit."""
+
+        return (
+            cls.MAX_EXTREME_TOTAL_CASES
+            if extreme_run_mode
+            else cls.MAX_TOTAL_CASES
+        )
 
     @staticmethod
     def _block_generation(p, message):
@@ -835,12 +846,15 @@ class LoRaTesterScript(scripts.Script):
             'last_generation_memory': state.get('last_generation_memory'),
             'ram_stop_reason': state.get('ram_stop_reason'),
             'output_retention': state.get('output_retention'),
+            'extreme_run_mode': state.get('extreme_run_mode', False),
+            'case_limit': state.get('case_limit'),
             'individual_output_dir': state.get('individual_output_dir'),
             'individual_images_finalized': state.get('individual_images_finalized', 0),
             'individual_finalize_error': state.get('individual_finalize_error'),
             'individual_finalize_failures': state.get('individual_finalize_failures', 0),
             'expected_cell_count': len(state.get('cases', [])),
             'completed_cell_count': len(cells),
+            'reference_row': state.get('reference_row'),
             'generation_interrupted': state.get('generation_interrupted', False),
             'matrix_only_delete_allowed': state.get(
                 'matrix_only_delete_allowed',
@@ -1006,8 +1020,12 @@ class LoRaTesterScript(scripts.Script):
             with gr.Accordion("Advanced Options", open=False):
                 with FormRow():
                     save_original = gr.Checkbox(
-                        value=False,
-                        label="Also generate without any LoRA (baseline)",
+                        value=True,
+                        label="Generate reference image without tested LoRA (Recommended)",
+                        info=(
+                            "The fixed-seed reference is repeated at the top of every "
+                            "matrix page for direct comparison."
+                        ),
                         elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_baseline"
                     )
 
@@ -1016,6 +1034,17 @@ class LoRaTesterScript(scripts.Script):
                         label="Draw legend in matrix grid (LoRA names + trigger words)",
                         elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_draw_legend"
                     )
+
+                extreme_run_mode = gr.Checkbox(
+                    value=False,
+                    label="Extreme Run Mode (up to 10,000 matrix cells)",
+                    info=(
+                        "CAUTION: Extreme runs can take many hours or days and may use "
+                        "very large amounts of disk space. Forge, driver, model, extension, "
+                        "or system instability cannot be ruled out during very long runs."
+                    ),
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_extreme_run"
+                )
 
                 with FormRow():
                     matrix_cols = gr.Slider(
@@ -1233,6 +1262,7 @@ class LoRaTesterScript(scripts.Script):
             trigger_position,
             lora_settings,
             save_original,
+            extreme_run_mode,
             draw_legend,
             matrix_cols,
             matrix_margin,
@@ -1247,7 +1277,8 @@ class LoRaTesterScript(scripts.Script):
     def before_process(self, p: StableDiffusionProcessing,
                        lora_tester_enabled, lora_selection, global_weight_spec,
                        use_trigger_words, trigger_position, lora_settings,
-                       save_original, draw_legend, matrix_cols, matrix_margin,
+                       save_original, extreme_run_mode, draw_legend,
+                       matrix_cols, matrix_margin,
                        output_retention,
                        unload_models_before_matrix,
                        adaptive_ram, ram_budget, custom_ram_gb, minimum_free_ram_gb):
@@ -1295,6 +1326,7 @@ class LoRaTesterScript(scripts.Script):
             if row[0] not in (None, "")
         }
 
+        case_limit = self._maximum_total_cases(extreme_run_mode)
         cases = []
         if save_original:
             cases.append({
@@ -1365,12 +1397,18 @@ class LoRaTesterScript(scripts.Script):
                     return
 
             for weight in weights:
-                if len(cases) >= self.MAX_TOTAL_CASES:
-                    print(
-                        f"[LoRA Tester] Reached the safety limit of {self.MAX_TOTAL_CASES} "
-                        "matrix cells; remaining weights were skipped"
+                if len(cases) >= case_limit:
+                    mode_hint = (
+                        "Reduce the selection or weight ranges."
+                        if extreme_run_mode
+                        else "Reduce the run or enable Extreme Run Mode."
                     )
-                    break
+                    self._block_generation(
+                        p,
+                        f"The requested run contains more than {case_limit:,} matrix "
+                        f"cells. {mode_hint}",
+                    )
+                    return
 
                 formatted_weight = self._format_weight(weight)
                 cases.append({
@@ -1379,9 +1417,6 @@ class LoRaTesterScript(scripts.Script):
                     'trigger_words': trigger_words,
                     'weight': formatted_weight,
                 })
-
-            if len(cases) >= self.MAX_TOTAL_CASES:
-                break
 
         if not cases:
             return
@@ -1422,6 +1457,8 @@ class LoRaTesterScript(scripts.Script):
 
         state = {
             'cases': cases,
+            'extreme_run_mode': bool(extreme_run_mode),
+            'case_limit': case_limit,
             'use_trigger_words': use_trigger_words,
             'trigger_position': trigger_position,
             'draw_legend': draw_legend,
@@ -1442,6 +1479,7 @@ class LoRaTesterScript(scripts.Script):
             'manifest_path': str(session_dir / "manifest.json"),
             'cells': {},
             'rows': [],
+            'reference_row': None,
             'ram_monitor': ram_monitor,
             'ram_finalizer': ram_finalizer,
             'fixed_seed': None,
@@ -1736,6 +1774,7 @@ class LoRaTesterScript(scripts.Script):
                 'label': case['label'],
                 'trigger_words': list(case.get('trigger_words', [])),
                 'weight': case.get('weight'),
+                'is_baseline': case.get('lora_tag_name') is None,
                 'width': int(original.width),
                 'height': int(original.height),
                 'persistent': False,
@@ -1791,7 +1830,8 @@ class LoRaTesterScript(scripts.Script):
     def postprocess(self, p: StableDiffusionProcessing, processed: Processed,
                    lora_tester_enabled, lora_selection, global_weight_spec,
                    use_trigger_words, trigger_position, lora_settings,
-                   save_original, draw_legend, matrix_cols, matrix_margin,
+                   save_original, extreme_run_mode, draw_legend,
+                   matrix_cols, matrix_margin,
                    output_retention,
                    unload_models_before_matrix,
                    adaptive_ram, ram_budget, custom_ram_gb, minimum_free_ram_gb):
@@ -1842,12 +1882,43 @@ class LoRaTesterScript(scripts.Script):
 
             self._unload_forge_model_for_matrix(p, state)
 
-            print(
-                f"[LoRA Tester] Creating row strips: {len(cells)} cells, "
-                f"{state['matrix_cols']} configured columns"
+            reference_cell = next(
+                (cell for cell in cells if cell.get('is_baseline')),
+                None,
             )
-            rows = self._build_row_strips(state, cells)
-            page_paths = self._build_matrix_pages(state, rows, p, processed, grid_info)
+            comparison_cells = [
+                cell for cell in cells if cell is not reference_cell
+            ]
+            reference_row = None
+            if reference_cell is not None:
+                reference_rows = self._build_row_strips(
+                    state,
+                    [reference_cell],
+                    columns=1,
+                    filename_prefix="reference-row",
+                    track_as_matrix_rows=False,
+                )
+                reference_row = reference_rows[0]
+                state['reference_row'] = reference_row
+
+            print(
+                f"[LoRA Tester] Creating row strips: {len(comparison_cells)} comparison "
+                f"cell(s), {state['matrix_cols']} configured columns; reference image: "
+                f"{'repeated on every page' if reference_row else 'disabled'}"
+            )
+            if comparison_cells:
+                rows = self._build_row_strips(state, comparison_cells)
+            else:
+                rows = []
+                state['rows'] = []
+            page_paths = self._build_matrix_pages(
+                state,
+                rows,
+                p,
+                processed,
+                grid_info,
+                reference_row=reference_row,
+            )
             self._validate_matrix_pages(page_paths)
 
             processed.images = [str(path) for path in page_paths]
@@ -1875,11 +1946,19 @@ class LoRaTesterScript(scripts.Script):
             )
         except Exception as error:
             self._write_manifest(state, "matrix-error")
-            fallback_paths = [
-                row['path']
-                for row in state.get('rows', [])
-                if Path(row['path']).exists()
-            ]
+            reference_path = (state.get('reference_row') or {}).get('path')
+            fallback_paths = (
+                [reference_path]
+                if reference_path and Path(reference_path).exists()
+                else []
+            )
+            fallback_paths.extend(
+                [
+                    row['path']
+                    for row in state.get('rows', [])
+                    if Path(row['path']).exists()
+                ]
+            )
             if not fallback_paths:
                 fallback_paths = [
                     cell['path']
@@ -1929,6 +2008,7 @@ class LoRaTesterScript(scripts.Script):
                 'label': case['label'],
                 'trigger_words': list(case.get('trigger_words', [])),
                 'weight': case.get('weight'),
+                'is_baseline': case.get('lora_tag_name') is None,
                 'width': int(image.width),
                 'height': int(image.height),
                 'persistent': False,
@@ -2073,10 +2153,20 @@ class LoRaTesterScript(scripts.Script):
 
         return result
 
-    def _build_row_strips(self, state, cells):
+    def _build_row_strips(
+        self,
+        state,
+        cells,
+        columns=None,
+        filename_prefix="row",
+        track_as_matrix_rows=True,
+    ):
         """Create labeled row files while decoding only one source cell at a time."""
 
-        columns = max(1, min(int(state['matrix_cols']), len(cells)))
+        if not cells:
+            return []
+        requested_columns = state['matrix_cols'] if columns is None else columns
+        columns = max(1, min(int(requested_columns), len(cells)))
         cell_width = max(int(cell['width']) for cell in cells)
         cell_height = max(int(cell['height']) for cell in cells)
         background = ImageColor.getcolor(shared.opts.grid_background_color, "RGB")
@@ -2122,7 +2212,9 @@ class LoRaTesterScript(scripts.Script):
                 else:
                     annotated_row = row_grid
 
-                row_path = Path(state['session_dir']) / f"row-{row_index:04d}.png"
+                row_path = Path(state['session_dir']) / (
+                    f"{filename_prefix}-{row_index:04d}.png"
+                )
                 self._save_png_atomic(annotated_row, row_path)
                 row_record = {
                     'index': row_index,
@@ -2146,27 +2238,34 @@ class LoRaTesterScript(scripts.Script):
                 if row_grid is not None:
                     row_grid.close()
 
-            state['rows'] = rows
-            self._write_manifest(state, "row-strips")
+            if track_as_matrix_rows:
+                state['rows'] = rows
+                self._write_manifest(state, "row-strips")
 
         # Keep every source cell until all matrix pages have been written and
         # validated. Matrix-only deletion is deliberately deferred to the final
         # cleanup; a page-composition failure must leave recoverable originals.
-        self._write_manifest(state, "row-strips-ready")
+        if track_as_matrix_rows:
+            self._write_manifest(state, "row-strips-ready")
         gc.collect()
         return rows
 
-    def _estimate_page_peak(self, state, rows):
-        width = max(row['width'] for row in rows)
-        height = sum(row['height'] for row in rows)
-        height += state['matrix_margin'] * max(0, len(rows) - 1)
+    def _estimate_page_peak(self, state, rows, reference_row=None):
+        page_rows = ([reference_row] if reference_row is not None else []) + list(rows)
+        if not page_rows:
+            return 0, 0, 0
+        width = max(row['width'] for row in page_rows)
+        height = sum(row['height'] for row in page_rows)
+        height += state['matrix_margin'] * max(0, len(page_rows) - 1)
         if width > self.MAX_MATRIX_DIMENSION or height > self.MAX_MATRIX_DIMENSION:
             return width, height, float('inf')
 
         # Four bytes per page pixel is deliberately conservative for an RGB PIL
         # canvas. Add the measured/theoretical working row and PNG encoding room.
         canvas_bytes = width * height * 4
-        largest_row_bytes = max(row['width'] * row['height'] * 4 for row in rows)
+        largest_row_bytes = max(
+            row['width'] * row['height'] * 4 for row in page_rows
+        )
         working_row = max(
             state.get('maximum_row_peak_bytes', 0),
             largest_row_bytes * 2,
@@ -2175,9 +2274,32 @@ class LoRaTesterScript(scripts.Script):
         estimated_peak = int(canvas_bytes * self.PAGE_SAFETY_FACTOR + working_row + encoding_reserve)
         return width, height, estimated_peak
 
-    def _build_matrix_pages(self, state, rows, p, processed, grid_info):
+    def _build_matrix_pages(
+        self, state, rows, p, processed, grid_info, reference_row=None
+    ):
         page_paths = []
         row_offset = 0
+
+        if not rows and reference_row is not None:
+            width, height, estimated_peak = self._estimate_page_peak(
+                state, [], reference_row
+            )
+            print(
+                f"[LoRA Tester] Matrix page 1: reference image only, "
+                f"estimated peak {estimated_peak / MIB:.0f} MB"
+            )
+            page_path = self._compose_matrix_page(
+                state,
+                [],
+                width,
+                height,
+                1,
+                p,
+                processed,
+                grid_info,
+                reference_row=reference_row,
+            )
+            return [Path(page_path)]
 
         while row_offset < len(rows):
             effective_available = self._effective_available(state)
@@ -2186,7 +2308,9 @@ class LoRaTesterScript(scripts.Script):
 
             for row in rows[row_offset:]:
                 candidate = selected_rows + [row]
-                _, _, estimated_peak = self._estimate_page_peak(state, candidate)
+                _, _, estimated_peak = self._estimate_page_peak(
+                    state, candidate, reference_row
+                )
                 dimensions_safe = estimated_peak != float('inf')
                 fits_ram = dimensions_safe and (
                     not state['adaptive_ram']
@@ -2221,10 +2345,13 @@ class LoRaTesterScript(scripts.Script):
                 )
                 continue
 
-            width, height, estimated_peak = self._estimate_page_peak(state, selected_rows)
+            width, height, estimated_peak = self._estimate_page_peak(
+                state, selected_rows, reference_row
+            )
             print(
                 f"[LoRA Tester] Matrix page {page_number}: {len(selected_rows)} row(s), "
                 f"estimated peak {estimated_peak / MIB:.0f} MB"
+                f"{' including repeated reference' if reference_row else ''}"
             )
             page_path = self._compose_matrix_page(
                 state,
@@ -2235,6 +2362,7 @@ class LoRaTesterScript(scripts.Script):
                 p,
                 processed,
                 grid_info,
+                reference_row=reference_row,
             )
             page_paths.append(Path(page_path))
             row_offset += len(selected_rows)
@@ -2242,19 +2370,34 @@ class LoRaTesterScript(scripts.Script):
 
         return page_paths
 
-    def _compose_matrix_page(self, state, rows, width, height, page_number,
-                             p, processed, grid_info):
+    def _compose_matrix_page(
+        self,
+        state,
+        rows,
+        width,
+        height,
+        page_number,
+        p,
+        processed,
+        grid_info,
+        reference_row=None,
+    ):
         background = ImageColor.getcolor(shared.opts.grid_background_color, "RGB")
         page = Image.new("RGB", (width, height), background)
         try:
+            page_rows = (
+                ([reference_row] if reference_row is not None else []) + list(rows)
+            )
             y = 0
-            for row in rows:
+            for row_index, row in enumerate(page_rows):
                 with Image.open(row['path']) as row_image:
                     row_image.load()
                     converted = row_image if row_image.mode == "RGB" else row_image.convert("RGB")
                     x = (width - converted.width) // 2
                     page.paste(converted, (x, y))
-                    y += converted.height + state['matrix_margin']
+                    y += converted.height
+                    if row_index + 1 < len(page_rows):
+                        y += state['matrix_margin']
                     if converted is not row_image:
                         converted.close()
 
@@ -2331,6 +2474,11 @@ class LoRaTesterScript(scripts.Script):
             if row_path and str(Path(row_path).resolve()) not in protected:
                 cleanup_complete = self._safe_unlink(row_path) and cleanup_complete
 
+        reference_row = state.get('reference_row') or {}
+        reference_path = reference_row.get('path')
+        if reference_path and str(Path(reference_path).resolve()) not in protected:
+            cleanup_complete = self._safe_unlink(reference_path) and cleanup_complete
+
         if state.get('recovery_retained'):
             self._write_manifest(state, "recovery-retained")
         elif cleanup_complete:
@@ -2345,4 +2493,3 @@ class LoRaTesterScript(scripts.Script):
         except OSError:
             # Unsaved gallery pages intentionally remain in Forge's temp tree.
             pass
-
