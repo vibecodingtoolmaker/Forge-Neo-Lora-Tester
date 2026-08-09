@@ -40,7 +40,20 @@ These instructions apply to the entire Forge Neo LoRA Tester repository.
 - Do not add runtime network requests, telemetry, downloaded code execution, or
   automatic dependency installation. Metadata files are untrusted data.
 - Preserve fixed-seed comparison: every baseline/LoRA/weight cell must use the first
-  resolved seed, including when the user enters seed `-1`.
+  resolved seed, including Embedding/weight cells and when the user enters seed `-1`.
+- Before model load, Embedding inventory may use Forge's selected UI preset and a
+  header-only Safetensors scan. Generation-time validation and injection must reuse
+  Forge's currently loaded SDXL text encoders and their compatibility-filtered
+  embedding databases. Do not load a second text encoder or language model. Keep the
+  initial Embedding Test scope to dual-encoder SDXL-compatible families (SDXL, Pony,
+  and Illustrious).
+- Preserve the filename stem as Forge's technical textual-inversion token. A distinct
+  trigger from neighboring Embedding JSON metadata is additional prompt text; when no
+  usable trigger exists, use the filename stem as the fallback without injecting it
+  twice.
+- Preserve per-Embedding prompt routing: table value `0` means positive and `1` means
+  negative. Reject other values visibly, and apply each row's target to the matching
+  normal and Hi-Res prompt without turning it into a run-wide setting.
 - Preserve disk-first processing. Completed full-size cells must be atomically spooled
   and large Forge/PIL result references released promptly.
 - Preserve Matrix-only recovery safety. Never delete source images unless all

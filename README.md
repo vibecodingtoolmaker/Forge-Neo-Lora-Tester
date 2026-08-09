@@ -1,12 +1,17 @@
 # LoRA Tester for Forge Neo
 
-LoRA Tester compares multiple LoRAs and weight ranges with one prompt and one
-fixed seed. It returns the results as one or more labeled, RAM-aware matrix pages.
+LoRA Tester compares multiple LoRAs or SDXL-compatible textual inversion embeddings
+and weight ranges with one prompt and one fixed seed. It returns the results as one
+or more labeled, RAM-aware matrix pages.
 
 > **Project status:** v0.2.0-beta.1 public beta. Extreme Run Mode completed a
 > 2,743-cell stress test covering 211 LoRAs with 13 weights each. Known limitations
 > remain; keep recoverable individual images enabled for important runs and please
 > report reproducible issues.
+
+> **Develop snapshot:** `v0.3.0-alpha.1` includes an unreleased Embedding Test for
+> dual-encoder SDXL, Pony, and Illustrious checkpoints. Live UI/preset validation has
+> passed; live image-generation validation is still in progress.
 
 ## Welcome
 
@@ -33,8 +38,9 @@ affiliated with or endorsed by OpenAI.
 - Loads the LoRA list automatically on first activation
 - Filters LoRAs by non-empty model folders, with optional subfolder inclusion
 - Offers manual selection across the complete LoRA directory
-- Reads trigger words from neighboring `.civitai.info` and `.json` metadata
-- Supports per-LoRA trigger text and weight overrides
+- Reads LoRA trigger words from neighboring `.json`/`.civitai.info` metadata and
+  Embedding triggers from `.json` with a filename fallback
+- Supports per-LoRA/per-Embedding trigger text and weight overrides
 - Supports positive and negative weights and inclusive ranges such as `-3:3:0.5`
 - Uses the first generated seed for every comparison cell
 - Generates a fixed-seed reference image without a tested LoRA by default
@@ -47,6 +53,12 @@ affiliated with or endorsed by OpenAI.
 - Keeps lossless individual source images by default
 - Offers recovery-safe matrix-only cleanup after successful matrix validation
 - Recreates Forge's configured temporary gallery directory if it is missing
+- Uses Forge's selected `xl` UI preset to discover `clip_l` + `clip_g` Safetensors
+  embeddings before a checkpoint is loaded, and refreshes the list on preset changes
+- Revalidates selected embeddings against both text encoders of the loaded SDXL,
+  Pony, or Illustrious checkpoint before generation
+- Supports global/per-Embedding weight ranges, Start/End placement, and a per-row
+  `0`/`1` choice for positive or negative injection, including matching Hi-Res prompts
 
 ## Requirements
 
@@ -62,11 +74,12 @@ The extension does not install or download packages by itself. The optional
 2. Keep the repository folder name as `Forge-Neo-Lora-Tester`.
 3. Restart Forge Neo.
 
-The **LoRA Tester** accordion is available in both txt2img and img2img.
+The **LoRA / Embedding Tester** accordion is available in both txt2img and img2img.
 
 ## Usage
 
-1. Open and enable **LoRA Tester**. The LoRA inventory loads on first activation.
+1. Open and enable **LoRA / Embedding Tester**. Keep **Test Type** set to **LoRA**.
+   The LoRA inventory loads on first activation.
 2. Choose a folder or keep **Manual selection (all folders)**. Selecting a specific
    folder selects all LoRAs in that scope. Manual mode tests only explicitly
    selected LoRAs.
@@ -84,19 +97,52 @@ The **LoRA Tester** accordion is available in both txt2img and img2img.
 Generation is blocked while LoRA Tester is enabled and no LoRA is selected.
 Disabling the accordion leaves normal Forge generation unchanged.
 
+### Embedding Test (develop, unreleased)
+
+1. Choose Forge UI Preset **xl**. This preset covers SDXL, Pony, and Illustrious.
+2. Open and enable **LoRA / Embedding Tester**, then choose **Embedding** as the
+   **Test Type**.
+3. The list is available before the checkpoint is loaded. It scans only Safetensors
+   headers for both `clip_l` and `clip_g`; tensor data is not loaded. Click
+   **Refresh Compatible Embeddings** after adding files.
+4. Select a folder or individual embeddings and enter one global weight or an
+   inclusive range. The per-Embedding table shows the discovered trigger words;
+   trigger and Min/Max/Step overrides work like LoRA overrides.
+5. Choose Start/End placement. In each Embedding row, keep **Negative prompt?** at
+   `0` for positive injection or set it to `1` for negative injection. This allows
+   positive and negative Embeddings in the same run.
+6. Select the SDXL, Pony, or Illustrious checkpoint to test, configure the shared
+   reference, matrix, retention, model-unload, and Extreme Run options, then generate
+   normally. Forge's loaded dual-CLIP databases perform the final compatibility check.
+
+Embedding weights use Forge's prompt-attention syntax, for example
+`(MyEmbedding:0.8)`. Forge registers this technical token from the Embedding filename.
+An activation phrase found in the sidecar metadata is inserted in addition to that
+token; if no usable metadata exists, the filename without its extension is the
+fallback and is not duplicated. The chosen token and trigger are also inserted into
+the corresponding Hi-Res positive or negative prompt. SD1.x embeddings and model
+families without both SDXL CLIP embedding databases are excluded in this first
+implementation. Pre-load discovery intentionally ignores pickle-based `.pt` and
+`.bin` files; after model load, Forge's own embedding databases remain authoritative.
+No second encoder or model is loaded.
+
 ## Folder and table behavior
 
 Only folders containing at least one LoRA are offered. Direct files appear before
 nested folder groups. **Include subfolders** determines whether a folder selection
 also contains its descendants.
 
-The per-LoRA table contains these columns:
+Both settings tables contain the identifier, trigger, and Min/Max/Step weight columns:
 
-- **LoRA (do not edit):** read-only relative model path
+- **LoRA/Embedding (do not edit):** read-only relative model path
 - **Trigger words:** comma-separated manual value; blank falls back to metadata
 - **Min / single weight:** one dedicated weight, or the start of a range
 - **Max:** range end
 - **Step:** range increment
+
+The per-Embedding table additionally contains **Negative prompt?**: `0` injects that
+row into the positive prompt and `1` injects it into the negative prompt. Any other
+value blocks generation and identifies the affected Embedding.
 
 Use the weight columns as follows:
 
@@ -138,10 +184,13 @@ The extension reads `trainedWords` from a neighboring `.civitai.info` file:
 ```
 
 Neighboring `.json` files may instead contain `activation text` or
-`trigger_words`. Manual non-blank table text overrides metadata. A blank cell
-falls back to metadata, including while Gradio is updating the table. Enter
-`<none>` to suppress triggers explicitly for one LoRA. Missing metadata is not an
-error.
+`trigger_words`. For Embeddings, the regular `.json` is checked; if it is missing or
+contains no usable trigger, the Embedding filename without `.safetensors` is used.
+The filename still remains the technical Forge textual-
+inversion token. Manual non-blank table text overrides metadata. A blank cell falls
+back to metadata, including while Gradio is updating the table. Enter `<none>` to
+suppress an additional trigger explicitly; for Embeddings this never removes the
+mandatory technical token. Missing metadata is not an error.
 
 **Trigger Word Position** is relative to the complete LoRA injection: **Start**
 places trigger text before the user's prompt, while **End** places it after the
@@ -150,9 +199,9 @@ LoRA tag. The batch log reports the resolved trigger text and position.
 ## Fixed-seed comparison
 
 Forge normally increments a seed across iterations. LoRA Tester rebuilds Forge's
-per-iteration random-number generator before every cell so that all LoRA and weight
-combinations use the seed of the first generated image. This preserves a meaningful
-visual comparison.
+per-iteration random-number generator before every cell so that all LoRA/weight or
+Embedding/weight combinations use the seed of the first generated image. This
+preserves a meaningful visual comparison.
 
 ## Adaptive RAM protection (disabled in v0.2.0)
 
@@ -211,7 +260,7 @@ Custom Forge output paths remain the controlling output boundary. Files are writ
 atomically below `tmp` and moved without a second encoding into the applicable
 txt2img or img2img run folder when individual images are retained.
 
-**CAUTION:** **Matrix only** permanently deletes individual LoRA test images only
+**CAUTION:** **Matrix only** permanently deletes individual comparison images only
 after every requested cell has completed and every matrix page has been written and
 validated. If generation is interrupted, matrix creation fails, a page is missing or
 empty, or deletion fails, source files and a recovery manifest are retained. This also
@@ -232,9 +281,12 @@ returned as recovery output and the recovery location is logged.
 
 ### Trigger words are missing
 
-- Confirm **Insert Trigger Words** is enabled.
+- For LoRAs, confirm **Insert Trigger Words** is enabled.
+- For Embeddings, inspect the trigger cell: a blank cell uses JSON metadata or the
+  filename fallback; `<none>` suppresses only an additional metadata trigger.
+- Confirm that **Negative prompt?** is `0` or `1` for every selected Embedding.
 - Check the batch log for `triggers:` and the final injected prompt.
-- Enter comma-separated text in the selected LoRA's table row.
+- Enter comma-separated text in the selected item's table row.
 
 ### A weight range is rejected
 
@@ -246,6 +298,12 @@ returned as recovery output and the recovery location is logged.
   and console instead of silently using another value.
 
 ## Known limitations in v0.2.0-beta.1
+
+- The develop-branch Embedding Test is limited to dual-encoder SDXL-compatible model
+  families (SDXL, Pony, and Illustrious) and still requires live image-generation
+  validation.
+- Preset detection is a capability hint for early UI discovery. The loaded checkpoint
+  is always the final authority when generation starts.
 
 - Adaptive RAM protection is visible but intentionally disabled while universal
   thresholds are evaluated. Disk spooling and optional model unloading remain active.
@@ -262,9 +320,10 @@ returned as recovery output and the recovery location is logged.
 ## Privacy and security
 
 LoRA Tester performs no network requests and executes no downloaded metadata. It
-reads model filenames and neighboring JSON metadata from Forge's configured LoRA
-directory, then writes images only inside Forge-derived output boundaries. Treat
-third-party model files as untrusted input and obtain them from sources you trust.
+reads model filenames and neighboring JSON metadata from Forge's configured LoRA and
+Embedding directories, then writes images only inside Forge-derived output boundaries.
+Treat third-party model files as untrusted input and obtain them from sources you
+trust.
 
 ## License
 

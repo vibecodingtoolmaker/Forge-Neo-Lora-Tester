@@ -7,6 +7,34 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+Current development snapshot: **v0.3.0-alpha.1** on `develop`. This snapshot is not
+tagged or published as a GitHub release; `v0.2.0-beta.1` remains the public release.
+
+### Added
+
+- Added an Embedding Test mode for textual inversion embeddings compatible with both
+  text encoders of the loaded SDXL, Pony, or Illustrious checkpoint.
+- Added folder selection, global and per-Embedding weight ranges, Start/End placement,
+  positive/negative prompt targets, and matching Hi-Res prompt injection.
+- Added reusable Forge UI-preset/model-family detection and header-only discovery of
+  SDXL dual-CLIP Safetensors embeddings before a checkpoint is loaded.
+- Added live preset synchronization: changing between `xl` and another Forge UI
+  preset dynamically refreshes or clears the compatible Embedding inventory.
+- Added Embedding trigger discovery from neighboring `.json` metadata with the
+  filename stem as fallback, plus editable per-Embedding trigger cells and
+  duplicate-safe prompt insertion.
+- Added a per-Embedding `0`/`1` table column for routing each item independently to
+  the positive or negative prompt, including its matching Hi-Res prompt.
+
+### Changed
+
+- Generalized fixed-seed matrix, disk-spooling, model-unload, output-retention, and
+  recovery handling so LoRA and Embedding comparisons share the same safety path.
+- Kept the loaded checkpoint and its existing Forge embedding databases as the final
+  generation-time compatibility authority; no additional text encoder is loaded.
+- Replaced the single global Embedding prompt target with per-row targeting so one
+  matrix run can contain both positive and negative Embeddings.
+
 ## [0.2.0-beta.1] - 2026-08-05
 
 ### Changed

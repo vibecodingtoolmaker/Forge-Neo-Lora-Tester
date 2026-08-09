@@ -2,11 +2,14 @@
 # Copyright (C) 2026 vibecodingtoolmaker
 
 """
-LoRA Tester Extension for Forge Neo
-Allows testing multiple LoRAs with the same prompt, automatically inserting trigger words.
+LoRA and Embedding Tester Extension for Forge Neo.
+
+Allows fixed-seed matrix testing of multiple LoRAs or SDXL-compatible textual
+inversion embeddings with one prompt.
 """
 
 import gc
+import html
 import os
 import json
 import shutil
@@ -28,6 +31,12 @@ except ImportError:
 from modules import scripts, shared, images
 from modules.ui_components import InputAccordion, FormRow
 from modules.processing import StableDiffusionProcessing, Processed, create_infotext
+from forge_neo_model_family import (
+    detect_model_family,
+    read_embedding_trigger_words,
+    resolve_forge_preset,
+    scan_sdxl_dual_clip_embeddings,
+)
 
 # Import LoRA system
 try:
@@ -210,6 +219,157 @@ class LoRaMetadataReader:
         return metadata
 
 
+class EmbeddingMetadataReader:
+    """Discover early candidates and validate against loaded SDXL text encoders."""
+
+    _disk_inventory_cache = {}
+
+    @staticmethod
+    def is_dual_encoder_embedding(embedding):
+        """Reject single-tensor concepts that cannot feed both SDXL CLIP models."""
+
+        vectors = getattr(embedding, "vec", None)
+        return isinstance(vectors, dict) and {"clip_l", "clip_g"}.issubset(vectors)
+
+    @staticmethod
+    def support_error(model) -> str | None:
+        if model is None:
+            return (
+                "No checkpoint is loaded. Load an SDXL, Pony, or Illustrious "
+                "checkpoint, then refresh the embedding list."
+            )
+        if not getattr(model, "is_sdxl", False):
+            return (
+                "Embedding Test currently supports only SDXL-compatible model "
+                "families (SDXL, Pony, and Illustrious)."
+            )
+
+        engines = (
+            getattr(model, "text_processing_engine_l", None),
+            getattr(model, "text_processing_engine_g", None),
+        )
+        if any(getattr(engine, "embeddings", None) is None for engine in engines):
+            return (
+                "The loaded checkpoint does not expose both SDXL text-encoder "
+                "embedding databases."
+            )
+        return None
+
+    @classmethod
+    def find_compatible_embeddings(cls, refresh=False, model=None):
+        """Return the intersection loaded by Forge's existing SDXL CLIP engines."""
+
+        if model is None:
+            model = getattr(shared, "sd_model", None)
+        error = cls.support_error(model)
+        if error:
+            return {}, error
+
+        databases = (
+            model.text_processing_engine_l.embeddings,
+            model.text_processing_engine_g.embeddings,
+        )
+        if refresh:
+            for database in databases:
+                database.load_textual_inversion_embeddings()
+
+        compatible_names = set(databases[0].word_embeddings).intersection(
+            databases[1].word_embeddings
+        )
+        embedding_root = Path(shared.cmd_opts.embeddings_dir).resolve()
+        embeddings = {}
+        for name in sorted(compatible_names, key=str.casefold):
+            embedding_l = databases[0].word_embeddings[name]
+            embedding_g = databases[1].word_embeddings[name]
+            if not all(
+                cls.is_dual_encoder_embedding(embedding)
+                for embedding in (embedding_l, embedding_g)
+            ):
+                continue
+            filename = getattr(embedding_l, "filename", None) or getattr(
+                embedding_g, "filename", None
+            )
+            if not filename:
+                continue
+
+            path = Path(filename).resolve()
+            try:
+                relative_path = path.relative_to(embedding_root)
+            except ValueError:
+                # Forge should only expose files from its configured embedding
+                # directories. Keep this extension inside that same boundary.
+                continue
+
+            embeddings[str(relative_path)] = {
+                "name": str(name),
+                "vectors": int(getattr(embedding_l, "vectors", 0) or 0),
+                "shape": int(getattr(embedding_l, "shape", 0) or 0),
+            }
+            trigger_words, trigger_source = read_embedding_trigger_words(path)
+            embeddings[str(relative_path)].update(
+                {
+                    "trigger_words": trigger_words,
+                    "trigger_source": trigger_source,
+                }
+            )
+
+        if embeddings:
+            status = (
+                f"Found {len(embeddings)} embedding(s) compatible with both "
+                "text encoders of the loaded SDXL-family checkpoint."
+            )
+        else:
+            status = (
+                "No embeddings compatible with both text encoders of the loaded "
+                "SDXL-family checkpoint were found."
+            )
+        return embeddings, status
+
+    @classmethod
+    def find_for_preset(cls, preset=None, refresh=False, model=None):
+        """Build an early UI inventory from the preset, without loading a model."""
+
+        family = detect_model_family(preset, shared.opts)
+        if not family.supports_sdxl_dual_clip_embeddings:
+            selected = f"'{family.preset}'" if family.preset else "unknown"
+            return {}, (
+                "Embedding Test currently supports only the Forge UI Preset 'xl' "
+                "(SDXL, Pony, and Illustrious). The selected preset is "
+                f"{selected}."
+            )
+
+        if model is None:
+            model = getattr(shared, "sd_model", None)
+        if cls.support_error(model) is None:
+            return cls.find_compatible_embeddings(refresh=refresh, model=model)
+
+        embedding_root = Path(shared.cmd_opts.embeddings_dir).resolve()
+        cache_key = str(embedding_root)
+        if refresh or cache_key not in cls._disk_inventory_cache:
+            cls._disk_inventory_cache[cache_key] = scan_sdxl_dual_clip_embeddings(
+                embedding_root
+            )
+        inventory = cls._disk_inventory_cache[cache_key]
+        embeddings = dict(inventory.embeddings)
+
+        if embeddings:
+            status = (
+                f"Found {len(embeddings)} SDXL dual-CLIP embedding(s) from "
+                f"Safetensors headers using UI Preset 'xl'. Forge will validate "
+                "the selection against the loaded checkpoint when generation starts."
+            )
+        else:
+            status = (
+                "UI Preset 'xl' is selected, but no Safetensors embedding containing "
+                "both clip_l and clip_g was found."
+            )
+        if inventory.unreadable_files:
+            status += (
+                f" {inventory.unreadable_files} Safetensors file(s) could not be read."
+            )
+        return embeddings, status
+
+
 class LoRaTesterScript(scripts.Script):
     """Main LoRA Tester script"""
 
@@ -220,7 +380,7 @@ class LoRaTesterScript(scripts.Script):
     # background sampler, and generation-stop logic cannot drift apart.
     RAM_WATCHDOG_ENABLED = False
     PROCESSING_STATE_ATTRIBUTE = "_lora_tester_state"
-    MAX_WEIGHTS_PER_LORA = 100
+    MAX_WEIGHTS_PER_ITEM = 100
     MAX_TOTAL_CASES = 500
     MAX_EXTREME_TOTAL_CASES = 10_000
     MAX_MATRIX_DIMENSION = 65_000
@@ -230,6 +390,12 @@ class LoRaTesterScript(scripts.Script):
     LABEL_MAX_LINES = 4
     ALL_LORA_FOLDERS = "__lora_tester_all_folders__"
     ROOT_LORA_FOLDER = "__lora_tester_root_folder__"
+    ALL_EMBEDDING_FOLDERS = "__lora_tester_all_embedding_folders__"
+    ROOT_EMBEDDING_FOLDER = "__lora_tester_root_embedding_folder__"
+    TEST_TYPE_LORA = "LoRA"
+    TEST_TYPE_EMBEDDING = "Embedding"
+    EMBEDDING_TARGET_POSITIVE = "Positive prompt"
+    EMBEDDING_TARGET_NEGATIVE = "Negative prompt"
     KEEP_INDIVIDUAL_OUTPUT = "Matrix + individual images (Recommended)"
     MATRIX_ONLY_OUTPUT = (
         "Matrix only — permanently delete individual images after successful matrix creation"
@@ -238,9 +404,10 @@ class LoRaTesterScript(scripts.Script):
     def __init__(self):
         super().__init__()
         self.cached_loras = {}
+        self.cached_embeddings = {}
 
     def title(self):
-        return "LoRA Tester"
+        return "LoRA / Embedding Tester"
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
@@ -281,7 +448,7 @@ class LoRaTesterScript(scripts.Script):
 
     @classmethod
     def _resolve_trigger_words(cls, metadata_triggers, settings_value=None):
-        """Resolve a per-LoRA trigger cell with metadata as the safe default."""
+        """Resolve a per-item trigger cell with metadata as the safe default."""
         trigger_text = cls._cell_text(settings_value)
         if trigger_text.casefold() == "<none>":
             return []
@@ -292,6 +459,25 @@ class LoRaTesterScript(scripts.Script):
                 if trigger.strip()
             ]
         return list(metadata_triggers or [])
+
+    @classmethod
+    def _resolve_embedding_target(cls, settings_value=None):
+        """Map a per-Embedding 0/1 marker to its prompt target."""
+
+        target_text = cls._cell_text(settings_value) or "0"
+        try:
+            target_value = Decimal(target_text)
+        except InvalidOperation:
+            target_value = None
+
+        if target_value == 0:
+            return cls.EMBEDDING_TARGET_POSITIVE, None
+        if target_value == 1:
+            return cls.EMBEDDING_TARGET_NEGATIVE, None
+        return None, (
+            "The Embedding prompt target must be 0 for the positive prompt or "
+            f"1 for the negative prompt. Invalid value: {target_text!r}."
+        )
 
     @staticmethod
     def _compose_lora_prompt(
@@ -309,6 +495,55 @@ class LoRaTesterScript(scripts.Script):
         if str(trigger_position or "Start").casefold() == "end":
             return f"{prompt_with_lora}, {trigger_text}"
         return f"{trigger_text}, {prompt_with_lora}"
+
+    @staticmethod
+    def _compose_embedding_prompt(
+        prompt, embedding_name, trigger_words, weight, position
+    ):
+        """Insert the Forge Embedding token and its optional metadata trigger."""
+
+        prompt = str(prompt or "").strip()
+        embedding_name = str(embedding_name or "")
+        if not embedding_name.strip():
+            return prompt
+
+        weighted_embedding = f"({embedding_name}:{weight})"
+        distinct_triggers = []
+        for trigger in trigger_words or []:
+            raw_trigger = str(trigger)
+            if raw_trigger.casefold() == embedding_name.casefold():
+                continue
+            trigger = raw_trigger.strip()
+            if not trigger:
+                continue
+            if trigger.casefold() in {
+                existing.casefold() for existing in distinct_triggers
+            }:
+                continue
+            distinct_triggers.append(trigger)
+
+        if str(position or "Start").casefold() == "end":
+            embedding_parts = [weighted_embedding, *distinct_triggers]
+        else:
+            embedding_parts = [*distinct_triggers, weighted_embedding]
+        embedding_text = ", ".join(embedding_parts)
+        if not prompt:
+            return embedding_text
+        if str(position or "Start").casefold() == "end":
+            return f"{prompt}, {embedding_text}"
+        return f"{embedding_text}, {prompt}"
+
+    @staticmethod
+    def _case_is_baseline(case):
+        """Recognize new typed cases and recovery data from older runs."""
+
+        kind = case.get("kind")
+        if kind is not None:
+            return kind == "baseline"
+        return (
+            case.get("lora_tag_name") is None
+            and case.get("embedding_name") is None
+        )
 
     @classmethod
     def _parse_weight_spec(cls, spec, description):
@@ -347,14 +582,14 @@ class LoRaTesterScript(scripts.Script):
         current = start
         in_range = lambda value: value <= end if direction > 0 else value >= end
 
-        while in_range(current) and len(values) < cls.MAX_WEIGHTS_PER_LORA:
+        while in_range(current) and len(values) < cls.MAX_WEIGHTS_PER_ITEM:
             values.append(float(current))
             current += step
 
         if in_range(current):
             print(
                 f"[LoRA Tester] {description} weight range contains more than "
-                f"{cls.MAX_WEIGHTS_PER_LORA} values and was rejected"
+                f"{cls.MAX_WEIGHTS_PER_ITEM} values and was rejected"
             )
             return None
 
@@ -368,6 +603,43 @@ class LoRaTesterScript(scripts.Script):
             cls.MAX_EXTREME_TOTAL_CASES
             if extreme_run_mode
             else cls.MAX_TOTAL_CASES
+        )
+
+    @classmethod
+    def _resolve_item_weights(cls, settings_row, weight_offset, global_weights, item):
+        """Resolve one optional Min/Max/Step override without silent fallback."""
+
+        if settings_row is None:
+            return global_weights, None
+
+        minimum = cls._cell_text(settings_row[weight_offset])
+        maximum = cls._cell_text(settings_row[weight_offset + 1])
+        step = cls._cell_text(settings_row[weight_offset + 2])
+        if not minimum and not maximum and not step:
+            return global_weights, None
+        if minimum and not maximum and not step:
+            weights = cls._parse_weight_spec(minimum, item)
+            if weights is None:
+                return None, (
+                    f"The individual weight for '{item}' is invalid. Enter one "
+                    "number in Min / single weight, or leave all three weight "
+                    "fields blank to use the global value."
+                )
+            return weights, None
+        if minimum and maximum and step:
+            weights = cls._parse_weight_spec(
+                f"{minimum}:{maximum}:{step}", item
+            )
+            if weights is None:
+                return None, (
+                    f"The individual weight range for '{item}' is invalid. Use "
+                    "finite numbers and a non-zero Step value."
+                )
+            return weights, None
+        return None, (
+            f"The individual weight settings for '{item}' are incomplete. Enter "
+            "only Min / single weight for one value, fill Min, Max, and Step for "
+            "a range, or leave all three fields blank to use the global value."
         )
 
     @staticmethod
@@ -416,6 +688,55 @@ class LoRaTesterScript(scripts.Script):
             triggers = ", ".join(info.get('trigger_words', []))
             rows.append([lora_path, triggers, "", "", ""])
 
+        return rows
+
+    @staticmethod
+    def _coerce_embedding_settings_rows(settings):
+        """Normalize Gradio Embedding Dataframe values to six-column rows."""
+
+        if settings is None:
+            return []
+        if hasattr(settings, "values"):
+            settings = settings.values.tolist()
+        elif isinstance(settings, dict):
+            settings = settings.get("data", [])
+
+        rows = []
+        for row in settings or []:
+            if not isinstance(row, (list, tuple)) or not row:
+                continue
+            if len(row) == 4:
+                # Migrate rows from the initial Embedding UI, which had no
+                # editable trigger column: path, min, max, step.
+                normalized = [row[0], "", "0", *row[1:4]]
+            elif len(row) == 5:
+                # Migrate the trigger-aware layout that predated per-item prompt
+                # targets: path, trigger, min, max, step.
+                normalized = [row[0], row[1], "0", *row[2:5]]
+            else:
+                normalized = list(row[:6])
+                normalized.extend([""] * (6 - len(normalized)))
+            rows.append(normalized)
+        return rows
+
+    def _build_embedding_settings_rows(
+        self, selected_embeddings, current_settings=None
+    ):
+        """Build editable trigger/weight rows while preserving user edits."""
+
+        existing = {
+            str(row[0]): row
+            for row in self._coerce_embedding_settings_rows(current_settings)
+            if row[0] not in (None, "")
+        }
+        rows = []
+        for embedding_path in selected_embeddings or []:
+            if embedding_path in existing:
+                rows.append(existing[embedding_path])
+                continue
+            info = self.cached_embeddings.get(embedding_path, {})
+            triggers = ", ".join(info.get("trigger_words", []))
+            rows.append([embedding_path, triggers, "0", "", "", ""])
         return rows
 
     @staticmethod
@@ -480,6 +801,76 @@ class LoRaTesterScript(scripts.Script):
             parts = relative.parts
             # Files directly in the selected folder come first. Descendants are
             # appended afterwards, grouped by their relative subfolder path.
+            if len(parts) == 1:
+                return (0, "", parts[0].casefold())
+            subfolder = str(Path(*parts[:-1])).casefold()
+            return (1, subfolder, parts[-1].casefold())
+
+        return sorted(choices, key=folder_order)
+
+    @staticmethod
+    def _relative_embedding_folder(embedding_path):
+        """Return a normalized relative embedding folder, or root."""
+
+        parent = Path(str(embedding_path)).parent
+        return "" if parent == Path(".") else str(parent)
+
+    def _embedding_folder_choices(self):
+        """Build labeled choices for folders containing compatible embeddings."""
+
+        direct_counts = {}
+        recursive_counts = {}
+        for embedding_path in self.cached_embeddings:
+            folder = self._relative_embedding_folder(embedding_path)
+            direct_counts[folder] = direct_counts.get(folder, 0) + 1
+
+            parent = Path(folder) if folder else Path(".")
+            while parent != Path("."):
+                key = str(parent)
+                recursive_counts[key] = recursive_counts.get(key, 0) + 1
+                parent = parent.parent
+
+        choices = [(
+            f"Manual selection (all folders, {len(self.cached_embeddings)} embeddings)",
+            self.ALL_EMBEDDING_FOLDERS,
+        )]
+        root_count = direct_counts.get("", 0)
+        if root_count:
+            choices.append((f"Root folder ({root_count})", self.ROOT_EMBEDDING_FOLDER))
+
+        for folder in sorted(recursive_counts, key=lambda value: value.casefold()):
+            direct = direct_counts.get(folder, 0)
+            recursive = recursive_counts[folder]
+            if direct == recursive:
+                label = f"{folder} ({direct})"
+            else:
+                label = f"{folder} ({direct} direct / {recursive} incl. subfolders)"
+            choices.append((label, folder))
+        return choices
+
+    def _filtered_embedding_choices(self, folder_filter, include_subfolders):
+        """Return embeddings belonging to the selected relative folder scope."""
+
+        if folder_filter in (None, "", self.ALL_EMBEDDING_FOLDERS):
+            return sorted(self.cached_embeddings, key=str.casefold)
+
+        wanted_folder = (
+            "" if folder_filter == self.ROOT_EMBEDDING_FOLDER else str(folder_filter)
+        )
+        wanted_path = Path(wanted_folder) if wanted_folder else Path(".")
+        choices = []
+        for embedding_path in self.cached_embeddings:
+            folder = self._relative_embedding_folder(embedding_path)
+            folder_path = Path(folder) if folder else Path(".")
+            matches = folder_path == wanted_path
+            if include_subfolders:
+                matches = matches or wanted_path in folder_path.parents
+            if matches:
+                choices.append(embedding_path)
+
+        def folder_order(embedding_path):
+            relative = Path(str(embedding_path)).relative_to(wanted_path)
+            parts = relative.parts
             if len(parts) == 1:
                 return (0, "", parts[0].casefold())
             subfolder = str(Path(*parts[:-1])).casefold()
@@ -761,6 +1152,18 @@ class LoRaTesterScript(scripts.Script):
         if effective_prompt is not None and case_index < len(all_prompts):
             all_prompts[case_index] = effective_prompt
 
+        all_negative_prompts = list(
+            getattr(p, 'all_negative_prompts', []) or []
+        )
+        effective_negative_prompt = state.get(
+            'effective_negative_prompts', {}
+        ).get(case_index)
+        if (
+            effective_negative_prompt is not None
+            and case_index < len(all_negative_prompts)
+        ):
+            all_negative_prompts[case_index] = effective_negative_prompt
+
         try:
             return create_infotext(
                 p,
@@ -769,7 +1172,7 @@ class LoRaTesterScript(scripts.Script):
                 p.all_subseeds,
                 iteration=case_index,
                 position_in_batch=0,
-                all_negative_prompts=p.all_negative_prompts,
+                all_negative_prompts=all_negative_prompts,
             )
         except Exception as error:
             label = state['cases'][case_index]['label']
@@ -928,100 +1331,219 @@ class LoRaTesterScript(scripts.Script):
     def ui(self, is_img2img):
         """Create the UI for LoRA Tester"""
 
-        with InputAccordion(False, label="LoRA Tester", elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester") as lora_tester_enabled:
+        with InputAccordion(False, label="LoRA / Embedding Tester", elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester") as lora_tester_enabled:
+            test_type = gr.Radio(
+                choices=[self.TEST_TYPE_LORA, self.TEST_TYPE_EMBEDDING],
+                value=self.TEST_TYPE_LORA,
+                label="Test Type",
+                info=(
+                    "Embedding Test currently supports SDXL, Pony, and Illustrious "
+                    "checkpoints with dual-encoder SDXL embeddings."
+                ),
+                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_type",
+            )
 
-            with FormRow():
-                refresh_loras_btn = gr.Button("Refresh LoRA List", variant="secondary", size="sm")
-
-            with FormRow():
-                lora_folder = gr.Dropdown(
-                    choices=[("Manual selection (all folders)", self.ALL_LORA_FOLDERS)],
-                    value=self.ALL_LORA_FOLDERS,
-                    label="LoRA Folder",
-                    info=(
-                        "Selecting a specific folder loads all LoRAs in that scope into "
-                        "the selection and per-LoRA table. Manual selection shows all LoRAs "
-                        "but only tests those selected explicitly."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_folder"
-                )
-                include_subfolders = gr.Checkbox(
-                    value=True,
-                    label="Include subfolders",
-                    info="Also include LoRAs stored below the selected folder.",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_include_subfolders"
-                )
-
-            with FormRow():
-                lora_selection = gr.Dropdown(
-                    choices=[],
-                    multiselect=True,
-                    label="Select LoRAs to Test",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_selection",
-                    info="Select one or more LoRAs to test with the current prompt"
-                )
-
-            with FormRow():
-                global_weight_spec = gr.Textbox(
-                    value="1.0",
-                    label="Global LoRA Weight(s)",
-                    placeholder="1.0 or -3:3:0.5",
-                    info="Use one value or an inclusive start:end:step range. Per-LoRA overrides are available below.",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_weights"
-                )
-
-            with gr.Accordion("Per-LoRA Settings", open=True):
+            with gr.Group(visible=True) as lora_controls:
                 with FormRow():
-                    use_trigger_words = gr.Checkbox(
-                        value=True,
-                        label="Insert Trigger Words",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_use_triggers"
-                    )
-                    trigger_position = gr.Radio(
-                        choices=["Start", "End"],
-                        value="Start",
-                        label="Trigger Word Position",
-                        info="Start = before the prompt. End = after the LoRA tag.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_trigger_pos"
+                    refresh_loras_btn = gr.Button(
+                        "Refresh LoRA List", variant="secondary", size="sm"
                     )
 
-                gr.HTML(
+                with FormRow():
+                    lora_folder = gr.Dropdown(
+                        choices=[("Manual selection (all folders)", self.ALL_LORA_FOLDERS)],
+                        value=self.ALL_LORA_FOLDERS,
+                        label="LoRA Folder",
+                        info=(
+                            "Selecting a specific folder loads all LoRAs in that scope into "
+                            "the selection and per-LoRA table. Manual selection shows all LoRAs "
+                            "but only tests those selected explicitly."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_folder"
+                    )
+                    include_subfolders = gr.Checkbox(
+                        value=True,
+                        label="Include subfolders",
+                        info="Also include LoRAs stored below the selected folder.",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_include_subfolders"
+                    )
+
+                with FormRow():
+                    lora_selection = gr.Dropdown(
+                        choices=[],
+                        multiselect=True,
+                        label="Select LoRAs to Test",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_selection",
+                        info="Select one or more LoRAs to test with the current prompt"
+                    )
+
+                with FormRow():
+                    global_weight_spec = gr.Textbox(
+                        value="1.0",
+                        label="Global LoRA Weight(s)",
+                        placeholder="1.0 or -3:3:0.5",
+                        info="Use one value or an inclusive start:end:step range. Per-LoRA overrides are available below.",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_weights"
+                    )
+
+                with gr.Accordion("Per-LoRA Settings", open=True):
+                    with FormRow():
+                        use_trigger_words = gr.Checkbox(
+                            value=True,
+                            label="Insert Trigger Words",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_use_triggers"
+                        )
+                        trigger_position = gr.Radio(
+                            choices=["Start", "End"],
+                            value="Start",
+                            label="Trigger Word Position",
+                            info="Start = before the prompt. End = after the LoRA tag.",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_trigger_pos"
+                        )
+
+                    gr.HTML(
+                        value=(
+                            "<p style='color: #888; font-size: 0.9em;'>"
+                            "Examples: <code>0.8 | blank | blank</code> = one dedicated weight; "
+                            "<code>-1 | 1 | 0.25</code> = range from -1 to 1. "
+                            "Leave Min, Max, and Step blank to use the global setting. "
+                            "A blank trigger cell uses metadata; enter <code>&lt;none&gt;</code> "
+                            "to explicitly disable triggers for one LoRA.</p>"
+                        )
+                    )
+
+                    lora_settings = gr.Dataframe(
+                        value=[],
+                        headers=[
+                            "LoRA (do not edit)",
+                            "Trigger words (comma-separated)",
+                            "Min / single weight",
+                            "Max",
+                            "Step",
+                        ],
+                        datatype=["str", "str", "str", "str", "str"],
+                        type="array",
+                        row_count=(0, "dynamic"),
+                        col_count=(5, "fixed"),
+                        interactive=True,
+                        wrap=True,
+                        height=300,
+                        column_widths=["30%", "34%", "14%", "11%", "11%"],
+                        label="Selected LoRA Settings",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_settings"
+                    )
+
+            with gr.Group(visible=False) as embedding_controls:
+                preset_bridge = gr.Textbox(
+                    value=resolve_forge_preset(forge_options=shared.opts),
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_bridge",
+                    elem_classes=["lora-tester-preset-bridge"],
+                )
+                preset_refresh_bridge = gr.Button(
+                    "Sync Forge preset",
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_refresh",
+                    elem_classes=["lora-tester-preset-bridge"],
+                )
+                with FormRow():
+                    refresh_embeddings_btn = gr.Button(
+                        "Refresh Compatible Embeddings", variant="secondary", size="sm"
+                    )
+
+                embedding_status = gr.HTML(
                     value=(
                         "<p style='color: #888; font-size: 0.9em;'>"
-                        "Examples: <code>0.8 | blank | blank</code> = one dedicated weight; "
-                        "<code>-1 | 1 | 0.25</code> = range from -1 to 1. "
-                        "Leave Min, Max, and Step blank to use the global setting. "
-                        "A blank trigger cell uses metadata; enter <code>&lt;none&gt;</code> "
-                        "to explicitly disable triggers for one LoRA.</p>"
+                        "Choose Forge UI Preset <code>xl</code> to discover compatible "
+                        "Safetensors embeddings before loading a checkpoint.</p>"
                     )
                 )
 
-                lora_settings = gr.Dataframe(
-                    value=[],
-                    headers=[
-                        "LoRA (do not edit)",
-                        "Trigger words (comma-separated)",
-                        "Min / single weight",
-                        "Max",
-                        "Step",
-                    ],
-                    datatype=["str", "str", "str", "str", "str"],
-                    type="array",
-                    row_count=(0, "dynamic"),
-                    col_count=(5, "fixed"),
-                    interactive=True,
-                    wrap=True,
-                    height=300,
-                    column_widths=["30%", "34%", "14%", "11%", "11%"],
-                    label="Selected LoRA Settings",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_settings"
+                with FormRow():
+                    embedding_folder = gr.Dropdown(
+                        choices=[(
+                            "Manual selection (all folders)",
+                            self.ALL_EMBEDDING_FOLDERS,
+                        )],
+                        value=self.ALL_EMBEDDING_FOLDERS,
+                        label="Embedding Folder",
+                        info=(
+                            "Before model load, Safetensors headers are filtered for "
+                            "clip_l + clip_g. The loaded checkpoint validates them at runtime."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_folder",
+                    )
+                    include_embedding_subfolders = gr.Checkbox(
+                        value=True,
+                        label="Include subfolders",
+                        info="Also include compatible embeddings below the selected folder.",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_subfolders",
+                    )
+
+                embedding_selection = gr.Dropdown(
+                    choices=[],
+                    multiselect=True,
+                    label="Select Embeddings to Test",
+                    info="Select one or more compatible textual inversion embeddings.",
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_selection",
                 )
+
+                with FormRow():
+                    global_embedding_weight_spec = gr.Textbox(
+                        value="1.0",
+                        label="Global Embedding Weight(s)",
+                        placeholder="1.0 or 0.5:1.5:0.25",
+                        info=(
+                            "Weights use Forge prompt attention. Per-embedding overrides "
+                            "are available below."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_weights",
+                    )
+                    embedding_position = gr.Radio(
+                        choices=["Start", "End"],
+                        value="Start",
+                        label="Embedding Position",
+                        info="Insert the weighted embedding before or after the existing prompt.",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_position",
+                    )
+                with gr.Accordion("Per-Embedding Settings", open=True):
+                    gr.HTML(
+                        value=(
+                            "<p style='color: #888; font-size: 0.9em;'>"
+                            "Trigger words come from JSON metadata, with the filename as "
+                            "fallback. Edit comma-separated triggers or enter "
+                            "<code>&lt;none&gt;</code> to suppress the additional trigger. "
+                            "Set Negative prompt? to <code>0</code> for positive or "
+                            "<code>1</code> for negative injection. "
+                            "Use Min alone for one weight, fill Min/Max/Step for a range, "
+                            "or leave all three weight cells blank for the global setting.</p>"
+                        )
+                    )
+                    embedding_settings = gr.Dataframe(
+                        value=[],
+                        headers=[
+                            "Embedding (do not edit)",
+                            "Trigger words (comma-separated)",
+                            "Negative prompt? (0 = Positive, 1 = Negative)",
+                            "Min / single weight",
+                            "Max",
+                            "Step",
+                        ],
+                        datatype=["str", "str", "str", "str", "str", "str"],
+                        type="array",
+                        row_count=(0, "dynamic"),
+                        col_count=(6, "fixed"),
+                        interactive=True,
+                        wrap=True,
+                        height=300,
+                        column_widths=["25%", "28%", "19%", "11%", "9%", "8%"],
+                        label="Selected Embedding Settings",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_settings",
+                    )
 
             with gr.Accordion("Advanced Options", open=False):
                 with FormRow():
                     save_original = gr.Checkbox(
                         value=True,
-                        label="Generate reference image without tested LoRA (Recommended)",
+                        label="Generate reference image without tested item (Recommended)",
                         info=(
                             "The fixed-seed reference is repeated at the top of every "
                             "matrix page for direct comparison."
@@ -1031,7 +1553,7 @@ class LoRaTesterScript(scripts.Script):
 
                     draw_legend = gr.Checkbox(
                         value=True,
-                        label="Draw legend in matrix grid (LoRA names + trigger words)",
+                        label="Draw legend in matrix grid (names, weights, and triggers)",
                         elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_draw_legend"
                     )
 
@@ -1074,7 +1596,7 @@ class LoRaTesterScript(scripts.Script):
                     label="Output retention",
                     info=(
                         "CAUTION: Matrix-only mode permanently deletes all individual "
-                        "LoRA test images, but only after every matrix page has been "
+                        "comparison images, but only after every matrix page has been "
                         "created successfully. If matrix creation fails, the individual "
                         "images are kept for recovery."
                     ),
@@ -1141,11 +1663,12 @@ class LoRaTesterScript(scripts.Script):
                             elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_min_free_ram"
                         )
 
-            info_text = gr.HTML(
+            gr.HTML(
                 value=(
                     "<p style='color: #888; font-size: 0.9em;'>"
-                    "The extension returns one or more labeled matrix pages. Each LoRA/weight combination creates one matrix cell. "
-                    "Trigger words and optional weight overrides can be edited in the table above.</p>"
+                    "The extension returns one or more labeled matrix pages. Each "
+                    "LoRA/weight or Embedding/weight combination creates one matrix "
+                    "cell and uses the same fixed seed.</p>"
                 )
             )
 
@@ -1216,7 +1739,148 @@ class LoRaTesterScript(scripts.Script):
         def update_lora_settings(selected_loras, current_settings):
             return self._build_lora_settings_rows(selected_loras, current_settings)
 
+        def format_embedding_status(message, is_error=False):
+            color = "#d99a35" if is_error else "#888"
+            return (
+                f"<p style='color: {color}; font-size: 0.9em;'>"
+                f"{html.escape(message)}</p>"
+            )
+
+        def update_embedding_list(
+            folder_filter,
+            include_children,
+            selected_embeddings,
+            current_settings,
+            preset,
+            refresh=True,
+        ):
+            """Use the UI preset early and the loaded dual-CLIP DB when available."""
+
+            self.cached_embeddings, status = (
+                EmbeddingMetadataReader.find_for_preset(
+                    preset=preset,
+                    refresh=refresh,
+                )
+            )
+            folder_choices = self._embedding_folder_choices()
+            folder_values = {choice[1] for choice in folder_choices}
+            if folder_filter not in folder_values:
+                folder_filter = self.ALL_EMBEDDING_FOLDERS
+
+            choices = self._filtered_embedding_choices(
+                folder_filter, include_children
+            )
+            allowed_embeddings = set(choices)
+            selected_embeddings = [
+                embedding
+                for embedding in (selected_embeddings or [])
+                if embedding in allowed_embeddings
+            ]
+            rows = self._build_embedding_settings_rows(
+                selected_embeddings, current_settings
+            )
+            is_error = not self.cached_embeddings
+            return (
+                gr.update(choices=folder_choices, value=folder_filter),
+                gr.update(choices=choices, value=selected_embeddings),
+                rows,
+                format_embedding_status(status, is_error=is_error),
+            )
+
+        def load_embeddings_on_activation(
+            enabled,
+            folder_filter,
+            include_children,
+            selected_embeddings,
+            current_settings,
+            preset,
+        ):
+            if not enabled:
+                return gr.update(), gr.update(), current_settings, gr.update()
+            return update_embedding_list(
+                folder_filter,
+                include_children,
+                selected_embeddings,
+                current_settings,
+                preset,
+                refresh=False,
+            )
+
+        def update_embeddings_for_selected_type(
+            selected_type,
+            preset,
+            folder_filter,
+            include_children,
+            selected_embeddings,
+            current_settings,
+        ):
+            if selected_type != self.TEST_TYPE_EMBEDDING:
+                return gr.update(), gr.update(), current_settings, gr.update()
+            return update_embedding_list(
+                folder_filter,
+                include_children,
+                selected_embeddings,
+                current_settings,
+                preset,
+                refresh=False,
+            )
+
+        def apply_embedding_folder_filter(
+            folder_filter, include_children, selected_embeddings, current_settings
+        ):
+            choices = self._filtered_embedding_choices(
+                folder_filter, include_children
+            )
+            if folder_filter in (None, "", self.ALL_EMBEDDING_FOLDERS):
+                allowed_embeddings = set(choices)
+                selected_embeddings = [
+                    embedding
+                    for embedding in (selected_embeddings or [])
+                    if embedding in allowed_embeddings
+                ]
+            else:
+                selected_embeddings = list(choices)
+            rows = self._build_embedding_settings_rows(
+                selected_embeddings, current_settings
+            )
+            return gr.update(choices=choices, value=selected_embeddings), rows
+
+        def update_embedding_settings(selected_embeddings, current_settings):
+            return self._build_embedding_settings_rows(
+                selected_embeddings, current_settings
+            )
+
+        def toggle_test_type(selected_type):
+            embedding_mode = selected_type == self.TEST_TYPE_EMBEDDING
+            return (
+                gr.update(visible=not embedding_mode),
+                gr.update(visible=embedding_mode),
+            )
+
         # Wire up event handlers
+        test_type_event = test_type.change(
+            fn=toggle_test_type,
+            inputs=[test_type],
+            outputs=[lora_controls, embedding_controls],
+        )
+        test_type_event.then(
+            fn=update_embeddings_for_selected_type,
+            inputs=[
+                test_type,
+                preset_bridge,
+                embedding_folder,
+                include_embedding_subfolders,
+                embedding_selection,
+                embedding_settings,
+            ],
+            outputs=[
+                embedding_folder,
+                embedding_selection,
+                embedding_settings,
+                embedding_status,
+            ],
+        )
+
         lora_tester_enabled.change(
             fn=load_loras_on_activation,
             inputs=[
@@ -1227,6 +1891,24 @@ class LoRaTesterScript(scripts.Script):
                 lora_settings,
             ],
             outputs=[lora_folder, lora_selection, lora_settings]
+        )
+
+        lora_tester_enabled.change(
+            fn=load_embeddings_on_activation,
+            inputs=[
+                lora_tester_enabled,
+                embedding_folder,
+                include_embedding_subfolders,
+                embedding_selection,
+                embedding_settings,
+                preset_bridge,
+            ],
+            outputs=[
+                embedding_folder,
+                embedding_selection,
+                embedding_settings,
+                embedding_status,
+            ],
         )
 
         refresh_loras_btn.click(
@@ -1253,14 +1935,84 @@ class LoRaTesterScript(scripts.Script):
             outputs=[lora_settings]
         )
 
+        refresh_embeddings_btn.click(
+            fn=update_embedding_list,
+            inputs=[
+                embedding_folder,
+                include_embedding_subfolders,
+                embedding_selection,
+                embedding_settings,
+                preset_bridge,
+            ],
+            outputs=[
+                embedding_folder,
+                embedding_selection,
+                embedding_settings,
+                embedding_status,
+            ],
+        )
+
+        preset_refresh_bridge.click(
+            fn=update_embeddings_for_selected_type,
+            inputs=[
+                test_type,
+                preset_bridge,
+                embedding_folder,
+                include_embedding_subfolders,
+                embedding_selection,
+                embedding_settings,
+            ],
+            outputs=[
+                embedding_folder,
+                embedding_selection,
+                embedding_settings,
+                embedding_status,
+            ],
+            queue=False,
+            show_progress=False,
+        )
+
+        embedding_folder.input(
+            fn=apply_embedding_folder_filter,
+            inputs=[
+                embedding_folder,
+                include_embedding_subfolders,
+                embedding_selection,
+                embedding_settings,
+            ],
+            outputs=[embedding_selection, embedding_settings],
+        )
+
+        include_embedding_subfolders.input(
+            fn=apply_embedding_folder_filter,
+            inputs=[
+                embedding_folder,
+                include_embedding_subfolders,
+                embedding_selection,
+                embedding_settings,
+            ],
+            outputs=[embedding_selection, embedding_settings],
+        )
+
+        embedding_selection.change(
+            fn=update_embedding_settings,
+            inputs=[embedding_selection, embedding_settings],
+            outputs=[embedding_settings],
+        )
+
         # Return all components that will be passed to processing callbacks.
         return [
             lora_tester_enabled,
+            test_type,
             lora_selection,
             global_weight_spec,
             use_trigger_words,
             trigger_position,
             lora_settings,
+            embedding_selection,
+            global_embedding_weight_spec,
+            embedding_position,
+            embedding_settings,
             save_original,
             extreme_run_mode,
             draw_legend,
@@ -1275,8 +2027,11 @@ class LoRaTesterScript(scripts.Script):
         ]
 
     def before_process(self, p: StableDiffusionProcessing,
-                       lora_tester_enabled, lora_selection, global_weight_spec,
+                       lora_tester_enabled, test_type,
+                       lora_selection, global_weight_spec,
                        use_trigger_words, trigger_position, lora_settings,
+                       embedding_selection, global_embedding_weight_spec,
+                       embedding_position, embedding_settings,
                        save_original, extreme_run_mode, draw_legend,
                        matrix_cols, matrix_margin,
                        output_retention,
@@ -1294,21 +2049,52 @@ class LoRaTesterScript(scripts.Script):
         if not lora_tester_enabled:
             return
 
-        if not lora_selection:
-            message = (
-                "LoRA Tester is enabled, but no LoRA is selected. "
-                "Select at least one LoRA or disable LoRA Tester before generating."
+        embedding_mode = test_type == self.TEST_TYPE_EMBEDDING
+        selected_items = embedding_selection if embedding_mode else lora_selection
+        item_label = "Embedding" if embedding_mode else "LoRA"
+        if not selected_items:
+            self._block_generation(
+                p,
+                f"{item_label} Tester is enabled, but no {item_label} is selected. "
+                f"Select at least one {item_label} or disable the tester before generating.",
             )
-            self._block_generation(p, message)
             return
 
         self._move_spool_hooks_last(p)
         self._ensure_temp_directory()
 
-        if not self.cached_loras:
+        if embedding_mode:
+            support_error = EmbeddingMetadataReader.support_error(
+                getattr(p, "sd_model", None)
+            )
+            if support_error:
+                self._block_generation(p, support_error)
+                return
+            current_embeddings, _ = (
+                EmbeddingMetadataReader.find_compatible_embeddings(
+                    refresh=False,
+                    model=getattr(p, "sd_model", None),
+                )
+            )
+            self.cached_embeddings = current_embeddings
+            missing_embeddings = [
+                item for item in selected_items if item not in current_embeddings
+            ]
+            if missing_embeddings:
+                self._block_generation(
+                    p,
+                    "One or more selected embeddings are not compatible with the "
+                    "currently loaded SDXL-family checkpoint. Refresh the compatible "
+                    f"embedding list. First unavailable item: '{missing_embeddings[0]}'.",
+                )
+                return
+        elif not self.cached_loras:
             self.cached_loras = LoRaMetadataReader.find_all_loras()
 
-        global_weight_text = self._cell_text(global_weight_spec)
+        selected_global_spec = (
+            global_embedding_weight_spec if embedding_mode else global_weight_spec
+        )
+        global_weight_text = self._cell_text(selected_global_spec)
         if global_weight_text:
             global_weights = self._parse_weight_spec(global_weight_text, "global")
             if global_weights is None:
@@ -1320,9 +2106,15 @@ class LoRaTesterScript(scripts.Script):
                 return
         else:
             global_weights = [1.0]
+
         settings_by_lora = {
             str(row[0]): row
             for row in self._coerce_settings_rows(lora_settings)
+            if row[0] not in (None, "")
+        }
+        settings_by_embedding = {
+            str(row[0]): row
+            for row in self._coerce_embedding_settings_rows(embedding_settings)
             if row[0] not in (None, "")
         }
 
@@ -1330,71 +2122,79 @@ class LoRaTesterScript(scripts.Script):
         cases = []
         if save_original:
             cases.append({
-                'label': "Baseline (No LoRA)",
+                'kind': "baseline",
+                'label': f"Baseline (No {item_label})",
                 'lora_tag_name': None,
+                'embedding_name': None,
                 'trigger_words': [],
                 'weight': None,
             })
 
-        for lora_path in lora_selection:
-            lora_info = self.cached_loras.get(lora_path)
-            if lora_info is None:
-                print(f"[LoRA Tester] Warning: LoRA {lora_path} not found in cache")
-                continue
-
-            lora_name = lora_info['name']
-            lora_alias = lora_info.get('alias')
-            display_name = lora_alias or lora_name
-            settings_row = settings_by_lora.get(lora_path)
-            metadata_triggers = list(lora_info.get('trigger_words', []))
-
-            if settings_row is None:
-                trigger_words = self._resolve_trigger_words(metadata_triggers)
-                weights = global_weights
-            else:
-                # Gradio can transiently submit an empty Dataframe cell while
-                # folder-selection outputs are settling. Preserve metadata as
-                # the default; <none> remains an explicit per-LoRA opt-out.
-                trigger_words = self._resolve_trigger_words(
-                    metadata_triggers,
-                    settings_row[1],
-                )
-
-                minimum = self._cell_text(settings_row[2])
-                maximum = self._cell_text(settings_row[3])
-                step = self._cell_text(settings_row[4])
-
-                if not minimum and not maximum and not step:
-                    weights = global_weights
-                elif minimum and not maximum and not step:
-                    weights = self._parse_weight_spec(minimum, lora_path)
-                    if weights is None:
-                        self._block_generation(
-                            p,
-                            f"The individual weight for '{lora_path}' is invalid. "
-                            "Enter one number in Min / single weight, or leave all "
-                            "three weight fields blank to use the global value.",
-                        )
-                        return
-                elif minimum and maximum and step:
-                    weight_spec = f"{minimum}:{maximum}:{step}"
-                    weights = self._parse_weight_spec(weight_spec, lora_path)
-                    if weights is None:
-                        self._block_generation(
-                            p,
-                            f"The individual weight range for '{lora_path}' is invalid. "
-                            "Use finite numbers and a non-zero Step value.",
-                        )
-                        return
+        for item_path in selected_items:
+            if embedding_mode:
+                embedding_info = self.cached_embeddings.get(item_path)
+                if embedding_info is None:
+                    print(
+                        f"[LoRA Tester] Warning: Embedding {item_path} not found in cache"
+                    )
+                    continue
+                display_name = embedding_info["name"]
+                embedding_name = embedding_info["name"]
+                settings_row = settings_by_embedding.get(item_path)
+                metadata_triggers = list(embedding_info.get("trigger_words", []))
+                if settings_row is None:
+                    trigger_words = self._resolve_trigger_words(metadata_triggers)
                 else:
+                    trigger_words = self._resolve_trigger_words(
+                        metadata_triggers,
+                        settings_row[1],
+                    )
+                embedding_target, target_error = self._resolve_embedding_target(
+                    settings_row[2] if settings_row is not None else None
+                )
+                if target_error:
                     self._block_generation(
                         p,
-                        f"The individual weight settings for '{lora_path}' are incomplete. "
-                        "Enter only Min / single weight for one value, fill Min, Max, "
-                        "and Step for a range, or leave all three fields blank to use "
-                        "the global value.",
+                        f"{target_error} Embedding: '{item_path}'.",
                     )
                     return
+                weights, weight_error = self._resolve_item_weights(
+                    settings_row, 3, global_weights, item_path
+                )
+                lora_tag_name = None
+            else:
+                lora_path = item_path
+                lora_info = self.cached_loras.get(lora_path)
+                if lora_info is None:
+                    print(f"[LoRA Tester] Warning: LoRA {lora_path} not found in cache")
+                    continue
+
+                lora_name = lora_info['name']
+                lora_alias = lora_info.get('alias')
+                display_name = lora_alias or lora_name
+                embedding_name = None
+                embedding_target = None
+                lora_tag_name = lora_alias or lora_name
+                settings_row = settings_by_lora.get(lora_path)
+                metadata_triggers = list(lora_info.get('trigger_words', []))
+
+                if settings_row is None:
+                    trigger_words = self._resolve_trigger_words(metadata_triggers)
+                else:
+                    # Gradio can transiently submit an empty Dataframe cell while
+                    # folder-selection outputs are settling. Preserve metadata as
+                    # the default; <none> remains an explicit per-LoRA opt-out.
+                    trigger_words = self._resolve_trigger_words(
+                        metadata_triggers,
+                        settings_row[1],
+                    )
+                weights, weight_error = self._resolve_item_weights(
+                    settings_row, 2, global_weights, lora_path
+                )
+
+            if weight_error:
+                self._block_generation(p, weight_error)
+                return
 
             for weight in weights:
                 if len(cases) >= case_limit:
@@ -1412,13 +2212,22 @@ class LoRaTesterScript(scripts.Script):
 
                 formatted_weight = self._format_weight(weight)
                 cases.append({
+                    'kind': "embedding" if embedding_mode else "lora",
                     'label': f"{display_name} (weight {formatted_weight})",
-                    'lora_tag_name': lora_alias or lora_name,
+                    'lora_tag_name': lora_tag_name,
+                    'embedding_name': embedding_name,
+                    'embedding_target': embedding_target,
                     'trigger_words': trigger_words,
                     'weight': formatted_weight,
                 })
 
-        if not cases:
+        comparison_cases = [case for case in cases if not self._case_is_baseline(case)]
+        if not comparison_cases:
+            self._block_generation(
+                p,
+                f"No selected {item_label} could be prepared for generation. "
+                f"Refresh the {item_label} list and try again.",
+            )
             return
 
         output_mode = self._processing_output_mode(p)
@@ -1452,11 +2261,12 @@ class LoRaTesterScript(scripts.Script):
         calibration_case_index = next(
             index
             for index, case in enumerate(cases)
-            if case.get('lora_tag_name') is not None
+            if not self._case_is_baseline(case)
         )
 
         state = {
             'cases': cases,
+            'test_type': test_type,
             'extreme_run_mode': bool(extreme_run_mode),
             'case_limit': case_limit,
             'use_trigger_words': use_trigger_words,
@@ -1471,6 +2281,8 @@ class LoRaTesterScript(scripts.Script):
             'individual_images_finalized': 0,
             'individual_finalize_failures': 0,
             'effective_prompts': {},
+            'effective_negative_prompts': {},
+            'embedding_position': embedding_position,
             'unload_models_before_matrix': bool(unload_models_before_matrix),
             'model_unload_attempted': False,
             'model_unloaded': False,
@@ -1500,7 +2312,7 @@ class LoRaTesterScript(scripts.Script):
         self._write_manifest(state, "generating")
 
         # This hook runs before setup_prompts(), so Forge creates matching prompt,
-        # seed and subseed arrays for every LoRA case.
+        # seed and subseed arrays for every comparison case.
         p.n_iter = len(cases)
         p.batch_size = 1
 
@@ -1514,7 +2326,10 @@ class LoRaTesterScript(scripts.Script):
         if hasattr(p, 'return_mask_composite'):
             p.return_mask_composite = False
 
-        print(f"[LoRA Tester] Enabled with {len(lora_selection)} LoRAs")
+        print(
+            f"[LoRA Tester] {item_label} mode enabled with "
+            f"{len(selected_items)} selected item(s)"
+        )
         print(f"[LoRA Tester] Will generate {len(cases)} matrix cells total")
         if state['adaptive_ram']:
             print(
@@ -1537,7 +2352,7 @@ class LoRaTesterScript(scripts.Script):
             print("[LoRA Tester] Warning: psutil unavailable; adaptive RAM protection is disabled")
 
     def process(self, p: StableDiffusionProcessing, *args):
-        """Use one fixed seed so LoRA and weight comparisons are meaningful."""
+        """Use one fixed seed so every item/weight comparison is meaningful."""
         if not args or not args[0]:
             return
 
@@ -1666,7 +2481,7 @@ class LoRaTesterScript(scripts.Script):
                     else ""
                 )
                 print(
-                    f"[LoRA Tester] RAM after first LoRA generation: "
+                    f"[LoRA Tester] RAM after first comparison generation: "
                     f"{effective_available / GIB:.1f} GB effective available; "
                     f"persistent physical change "
                     f"{interval.get('persistent_growth_bytes', 0) / GIB:.1f} GB; "
@@ -1704,11 +2519,88 @@ class LoRaTesterScript(scripts.Script):
             monitor.begin_interval()
 
         case = state['cases'][batch_number]
-        lora_tag_name = case['lora_tag_name']
-        if lora_tag_name is None:
+        if self._case_is_baseline(case):
             state['effective_prompts'][batch_number] = prompts[0]
-            print(f"[LoRA Tester] Batch {batch_number}: Baseline (no LoRA)")
+            negative_prompts = getattr(p, 'negative_prompts', []) or []
+            if negative_prompts:
+                state['effective_negative_prompts'][batch_number] = negative_prompts[0]
+            print(
+                f"[LoRA Tester] Batch {batch_number}: "
+                f"Baseline (no {state.get('test_type', 'LoRA')})"
+            )
             return
+
+        if case.get('kind') == "embedding":
+            target_negative = (
+                case.get('embedding_target') == self.EMBEDDING_TARGET_NEGATIVE
+            )
+            target_prompts = (
+                getattr(p, 'negative_prompts', []) if target_negative else prompts
+            )
+            if not target_prompts:
+                self._block_generation(
+                    p,
+                    "The selected embedding prompt target is unavailable for this batch.",
+                )
+                prompts.clear()
+                return
+
+            for index in range(len(target_prompts)):
+                target_prompts[index] = self._compose_embedding_prompt(
+                    target_prompts[index],
+                    case['embedding_name'],
+                    case.get('trigger_words', []),
+                    case['weight'],
+                    state.get('embedding_position'),
+                )
+
+            start = batch_number * int(getattr(p, 'batch_size', 1))
+            end = start + len(target_prompts)
+            all_prompt_attribute = (
+                'all_negative_prompts' if target_negative else 'all_prompts'
+            )
+            all_target_prompts = getattr(p, all_prompt_attribute, None)
+            if all_target_prompts is not None:
+                all_target_prompts[start:end] = target_prompts
+
+            high_resolution_attribute = (
+                'all_hr_negative_prompts' if target_negative else 'all_hr_prompts'
+            )
+            high_resolution_prompts = getattr(
+                p, high_resolution_attribute, None
+            )
+            if high_resolution_prompts is not None:
+                for index in range(start, min(end, len(high_resolution_prompts))):
+                    high_resolution_prompts[index] = self._compose_embedding_prompt(
+                        high_resolution_prompts[index],
+                        case['embedding_name'],
+                        case.get('trigger_words', []),
+                        case['weight'],
+                        state.get('embedding_position'),
+                    )
+
+            if target_negative:
+                state['effective_prompts'][batch_number] = prompts[0]
+                state['effective_negative_prompts'][batch_number] = target_prompts[0]
+            else:
+                state['effective_prompts'][batch_number] = target_prompts[0]
+                negative_prompts = getattr(p, 'negative_prompts', []) or []
+                if negative_prompts:
+                    state['effective_negative_prompts'][batch_number] = (
+                        negative_prompts[0]
+                    )
+
+            print(
+                f"[LoRA Tester] Batch {batch_number}: {case['label']} -> "
+                f"Embedding '{case['embedding_name']}' in "
+                f"{'negative' if target_negative else 'positive'} prompt; "
+                f"triggers: {case.get('trigger_words', [])}; "
+                f"position: {state.get('embedding_position', 'Start')}"
+            )
+            print(f"[LoRA Tester] Injected prompt: {target_prompts[0]}")
+            return
+
+        lora_tag_name = case['lora_tag_name']
 
         # IMPORTANT: Forge Neo LoRA system uses JUST THE FILENAME, not the full path!
         # The system internally scans all directories and indexes by basename
@@ -1774,7 +2666,7 @@ class LoRaTesterScript(scripts.Script):
                 'label': case['label'],
                 'trigger_words': list(case.get('trigger_words', [])),
                 'weight': case.get('weight'),
-                'is_baseline': case.get('lora_tag_name') is None,
+                'is_baseline': self._case_is_baseline(case),
                 'width': int(original.width),
                 'height': int(original.height),
                 'persistent': False,
@@ -1828,8 +2720,11 @@ class LoRaTesterScript(scripts.Script):
             gc.collect()
 
     def postprocess(self, p: StableDiffusionProcessing, processed: Processed,
-                   lora_tester_enabled, lora_selection, global_weight_spec,
+                   lora_tester_enabled, test_type,
+                   lora_selection, global_weight_spec,
                    use_trigger_words, trigger_position, lora_settings,
+                   embedding_selection, global_embedding_weight_spec,
+                   embedding_position, embedding_settings,
                    save_original, extreme_run_mode, draw_legend,
                    matrix_cols, matrix_margin,
                    output_retention,
@@ -2008,7 +2903,7 @@ class LoRaTesterScript(scripts.Script):
                 'label': case['label'],
                 'trigger_words': list(case.get('trigger_words', [])),
                 'weight': case.get('weight'),
-                'is_baseline': case.get('lora_tag_name') is None,
+                'is_baseline': self._case_is_baseline(case),
                 'width': int(image.width),
                 'height': int(image.height),
                 'persistent': False,

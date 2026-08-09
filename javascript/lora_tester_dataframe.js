@@ -7,9 +7,12 @@
     const DATAFRAME_IDS = [
         "txt2img_lora_tester_settings",
         "img2img_lora_tester_settings",
+        "txt2img_lora_tester_embedding_settings",
+        "img2img_lora_tester_embedding_settings",
     ];
     const EDITOR_SELECTOR = 'input[role="textbox"]';
     const EDIT_PENDING_ATTRIBUTE = "data-lora-tester-edit-pending";
+    const PRESET_BRIDGES = ["txt2img", "img2img"];
 
     function eventElement(event) {
         return event.target instanceof Element ? event.target : null;
@@ -36,7 +39,7 @@
     }
 
     function isEditableCell(cell) {
-        // Column zero contains the LoRA path and is explicitly display-only.
+        // Column zero contains the LoRA/Embedding path and is display-only.
         return cell !== null && cell.cellIndex > 0;
     }
 
@@ -143,7 +146,7 @@
     function markReadOnlyCells(root) {
         root.querySelectorAll('tbody td:first-child[tabindex="0"]').forEach((cell) => {
             cell.setAttribute("aria-readonly", "true");
-            cell.title = "LoRA identifier (read only)";
+            cell.title = "Model item identifier (read only)";
         });
     }
 
@@ -166,6 +169,74 @@
         }
     }
 
-    onUiLoaded(installDataframeBehavior);
-    onAfterUiUpdate(installDataframeBehavior);
+    function setInputValue(input, value) {
+        const prototype = input instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(
+            prototype,
+            "value",
+        )?.set;
+        if (setter) {
+            setter.call(input, value);
+        } else {
+            input.value = value;
+        }
+        input.dispatchEvent(new Event("input", {bubbles: true}));
+        input.dispatchEvent(new Event("change", {bubbles: true}));
+    }
+
+    function selectedForgePreset() {
+        const root = gradioApp().querySelector("#forge_ui_preset");
+        const input = root?.querySelector("input");
+        return input?.value?.trim().toLowerCase() || null;
+    }
+
+    function syncForgePreset(force = false) {
+        const preset = selectedForgePreset();
+        if (!preset) {
+            return;
+        }
+
+        for (const mode of PRESET_BRIDGES) {
+            const bridgeRoot = gradioApp().querySelector(
+                `#${mode}_lora_tester_preset_bridge`,
+            );
+            const bridge = bridgeRoot?.querySelector("textarea, input");
+            const refresh = gradioApp().querySelector(
+                `#${mode}_lora_tester_preset_refresh`,
+            );
+            if (!bridge || !refresh) {
+                continue;
+            }
+            if (!force && bridge.value.trim().toLowerCase() === preset) {
+                continue;
+            }
+            setInputValue(bridge, preset);
+            setTimeout(() => refresh.click(), 0);
+        }
+    }
+
+    function installPresetBridge() {
+        const root = gradioApp().querySelector("#forge_ui_preset");
+        if (!root) {
+            return;
+        }
+        if (root.dataset.loraTesterPresetInstalled !== "true") {
+            root.dataset.loraTesterPresetInstalled = "true";
+            const scheduleSync = () => setTimeout(() => syncForgePreset(), 0);
+            root.addEventListener("input", scheduleSync);
+            root.addEventListener("change", scheduleSync);
+        }
+        syncForgePreset();
+    }
+
+    onUiLoaded(() => {
+        installDataframeBehavior();
+        installPresetBridge();
+    });
+    onAfterUiUpdate(() => {
+        installDataframeBehavior();
+        installPresetBridge();
+    });
 })();

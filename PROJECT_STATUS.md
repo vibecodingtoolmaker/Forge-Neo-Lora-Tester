@@ -1,6 +1,6 @@
 # Forge Neo LoRA Tester – Project Status
 
-Last updated: 2026-08-05
+Last updated: 2026-08-09
 
 Repository: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester
 
@@ -12,6 +12,8 @@ then this document, `README.md`, and the current Git diff before changing code.
 ## Current state
 
 - Current public release: **v0.2.0-beta.1** (GitHub pre-release, 2026-08-05).
+- Current development snapshot: **v0.3.0-alpha.1** on `develop` (unreleased and
+  intentionally untagged).
 - Release tag: `v0.2.0-beta.1` -> `main` commit `14c6dae`.
 - Release feature commit on `main`: `c27c621`.
 - Current `develop` release commit: `2bb1bee`.
@@ -82,6 +84,66 @@ then this document, `README.md`, and the current Git diff before changing code.
 - Forge-Python syntax compilation passes.
 - `main`, `develop`, and tag `v0.2.0-beta.1` were pushed atomically.
 - GitHub pre-release published with stress-test and upgrade notes.
+
+## Changes implemented for v0.3.0-alpha.1 (develop, unreleased)
+
+### SDXL-compatible Embedding Test
+
+- Added a **Test Type** switch between the existing LoRA workflow and a new
+  textual-inversion Embedding workflow.
+- Added reusable Forge UI-preset/model-family helpers. The explicit browser value has
+  priority, with `shared.opts.forge_preset` as the pre-load fallback; `xl` maps to the
+  SDXL/Pony/Illustrious family.
+- Before model load, Embedding inventory reads only Safetensors headers and exposes
+  files containing both `clip_l` and `clip_g`. It does not load tensor data, an
+  encoder, or a model.
+- At generation time, compatibility is revalidated against the two embedding
+  databases owned by Forge's already loaded SDXL text encoders.
+- Added a browser-to-Gradio preset bridge. The open Embedding UI now updates when the
+  Forge preset changes, without Forge-core modifications.
+- Only embeddings accepted by both SDXL text encoders are selectable. The first
+  implementation is deliberately limited to SDXL-compatible dual-encoder families:
+  SDXL, Pony, and Illustrious.
+- Added folder-scoped Embedding selection, global and per-Embedding single/ranged
+  prompt-attention weights, Start/End placement, and per-row positive/negative prompt
+  targets (`0` = positive, `1` = negative).
+- Added per-Embedding trigger discovery. A neighboring `.json` activation value is
+  used when available; a missing/unusable JSON falls directly back to the filename
+  stem. Forge's filename-derived technical Embedding token remains present while a
+  distinct metadata trigger is inserted in addition; identical fallback values are
+  not doubled.
+- Positive or negative Hi-Res prompts receive the same per-cell Embedding injection.
+- Embedding cells share the existing fixed-seed, disk-spooling, page-splitting,
+  output-retention, model-unload, and recovery pipeline.
+- Automated coverage now distinguishes an Embedding cell from the baseline and
+  checks prompt/trigger composition, metadata precedence and fallback, table migration,
+  shared range validation, SDXL dual-encoder gating, preset resolution, and real
+  Safetensors header filtering.
+- All 27 development tests pass with Forge's Python environment; Forge-Python syntax
+  compilation and isolated Gradio UI construction also pass.
+- Live Forge UI validation passed with the real local inventory: 267 Safetensors were
+  scanned in about 1.3 seconds, 264 dual-CLIP Embeddings were shown for `xl`, the list
+  cleared for `flux`, and it returned to 264 after switching back to `xl`. Live image
+  generation remains outstanding.
+- The real 264-item compatible inventory resolves 165 triggers from `.json` and 99
+  from filename fallback. Four metadata triggers intentionally differ from their local
+  filenames and therefore exercise the separate technical-token/activation-phrase path.
+
+## Planned feature roadmap
+
+1. **Per-LoRA matrix output**
+   - Add output choices for one combined matrix plus one matrix per tested LoRA, or
+     only the individual per-LoRA matrices without the combined matrix.
+2. **LoRAs across multiple checkpoints**
+   - Test one or more LoRAs against multiple selected checkpoints.
+   - Intended matrix layout: LoRAs on the X axis and checkpoints on the Y axis.
+3. **Embedding Test follow-up**
+   - Manually validate and stabilize the new SDXL/Pony/Illustrious implementation,
+     then revisit broader model-family support if Forge expands compatible textual
+     inversion handling.
+4. **Multiple images/seeds per tested LoRA**
+   - Add incremental or random seed generation for several images per LoRA.
+   - Offer separate per-seed matrices in addition to the aggregate comparison.
 
 ## Important technical decisions and invariants
 
@@ -160,6 +222,10 @@ files. See `AGENTS.md` for the release procedure.
    - Threshold behavior was too hardware-specific and caused premature stops after
      initial model/LoRA loading spikes.
    - The 2,743-cell run succeeded with the watchdog disabled and model unload enabled.
+   - On 2026-08-09 the maintainer reported several days of extensive, stable use on
+     their machine without the watchdog. This is strong single-system evidence, but
+     not yet a basis for removing the existing disk/recovery safeguards or claiming
+     cross-system stability.
    - A universal design must account for Windows commit/pagefile headroom, persistent
      model allocation, temporary loading spikes, and page-composition memory.
 
@@ -226,25 +292,32 @@ files. See `AGENTS.md` for the release procedure.
   page composition, image finalization, and cleanup.
 - Upgrade testing from both `v0.1.0-beta.1` and a fresh clone of `v0.2.0-beta.1`.
 - Compatibility with future Forge Neo/Gradio/Pillow changes.
+- Embedding Test in live txt2img and img2img with SDXL, Pony, and Illustrious.
+- Positive and negative Embedding targets with Hi-Res fix enabled and disabled.
+- Mixed Embedding folder layouts, duplicate filename stems, incompatible SD1.x
+  embeddings, model switching followed by refresh, and multi-page Embedding runs.
 
 ## Recommended next steps
 
-1. Fix the eager LoRA-system import and eliminate the misleading startup warning.
-2. Run a short Forge smoke test after that fix: normal generation with the tester
+1. Run short SDXL/Pony/Illustrious Embedding smoke tests in txt2img and img2img,
+   covering positive/negative prompts, weight ranges, reference on/off, Hi-Res fix,
+   model unload on/off, and both output-retention modes.
+2. Fix the eager LoRA-system import and eliminate the misleading startup warning.
+3. Run a short Forge smoke test after that fix: normal generation with the tester
    disabled, one baseline + two LoRAs, model unload on/off, txt2img and img2img.
-3. Visually verify repeated references on at least a two-page matrix with legends
+4. Visually verify repeated references on at least a two-page matrix with legends
    both enabled and disabled.
-4. Add tests for the visible over-limit block in `before_process()`, not only the
+5. Add tests for the visible over-limit block in `before_process()`, not only the
    pure 500/10,000 limit helper.
-5. Test 65,000-pixel page encoding in every supported `grid_format`; reduce the
+6. Test 65,000-pixel page encoding in every supported `grid_format`; reduce the
    ceiling if any encoder or gallery rejects it.
-6. Fix the margin/date-folder beta limitations.
-7. Design static settings persistence without persisting dynamic LoRA selections.
-8. Add optional preflight information (planned cells, approximate rows/pages, and a
+7. Fix the margin/date-folder beta limitations.
+8. Design static settings persistence without persisting dynamic selections.
+9. Add optional preflight information (planned cells, approximate rows/pages, and a
    conservative disk/time warning) without adding another user-editable cell limit.
-9. Revisit adaptive RAM protection only after gathering measurements from different
+10. Revisit adaptive RAM protection only after gathering measurements from different
    RAM sizes, model families, pagefiles, and loading strategies.
-10. Consider manifest-based resume support for multi-hour Extreme Run jobs.
+11. Consider manifest-based resume support for multi-hour Extreme Run jobs.
 
 ## Relevant files and functions
 
@@ -253,8 +326,17 @@ files. See `AGENTS.md` for the release procedure.
 - `RamMonitor`: dormant peak sampler used only if the release switch is enabled.
 - `LoRaMetadataReader.get_lora_dir()`: derives Forge's configured LoRA directory.
 - `LoRaMetadataReader.find_all_loras()`: recursive model and metadata inventory.
+- `forge_neo_model_family.py`: portable preset normalization, model-family capability
+  mapping, Embedding sidecar-trigger resolution, and header-only SDXL dual-CLIP
+  Safetensors discovery.
+- `EmbeddingMetadataReader.find_for_preset()`: creates the early preset-aware UI
+  inventory without loading a model.
+- `EmbeddingMetadataReader.find_compatible_embeddings()`: reuses Forge's loaded SDXL
+  CLIP databases as the final authority and exposes true `clip_l` + `clip_g` entries.
 - `LoRaTesterScript.ui()`: all txt2img/img2img controls and callbacks.
-- `_parse_weight_spec()`: finite single/range parser, maximum 100 weights per LoRA.
+- `_parse_weight_spec()`: finite single/range parser, maximum 100 weights per item.
+- `_resolve_embedding_target()`: validates per-row `0`/`1` prompt routing.
+- `_compose_embedding_prompt()`: weighted positive/negative prompt injection.
 - `_maximum_total_cases()`: chooses 500 normal or 10,000 Extreme limit.
 - `_compose_lora_prompt()`: Start/End trigger placement and LoRA injection.
 - `before_process()`: validates UI data, expands cases, creates run state/manifest.
@@ -285,6 +367,10 @@ files. See `AGENTS.md` for the release procedure.
 - Normal/Extreme cell limits.
 - Reference-row inclusion in page estimates and every composed page.
 - 65,000-pixel page boundary.
+- Embedding prompt/trigger composition, sidecar precedence and filename fallback,
+  settings-table migration, dual-encoder compatibility gates, preset resolution,
+  Safetensors header discovery, shared weight validation, baseline classification,
+  and UI/callback argument order.
 
 ### Documentation and metadata
 
