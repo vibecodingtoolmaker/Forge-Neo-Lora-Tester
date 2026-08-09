@@ -7,8 +7,9 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-Current development snapshot: **v0.3.0-alpha.1** on `develop`. This snapshot is not
+Current development snapshot: **v0.3.0-alpha.2** on `develop`. This snapshot is not
 tagged or published as a GitHub release; `v0.2.0-beta.1` remains the public release.
+The previous development snapshot, **v0.3.0-alpha.1**, is commit `7ad1cbc`.
 
 ### Added
 
@@ -34,6 +35,12 @@ tagged or published as a GitHub release; `v0.2.0-beta.1` remains the public rele
   generation-time compatibility authority; no additional text encoder is loaded.
 - Replaced the single global Embedding prompt target with per-row targeting so one
   matrix run can contain both positive and negative Embeddings.
+
+### Fixed
+
+- Added an 89,000,000-pixel matrix-page area ceiling. Large valid grids now split
+  before Gradio reopens them through Pillow, preventing a post-build
+  `DecompressionBombError` while retaining the existing 65,000-pixel per-axis limit.
 
 ## [0.2.0-beta.1] - 2026-08-05
 

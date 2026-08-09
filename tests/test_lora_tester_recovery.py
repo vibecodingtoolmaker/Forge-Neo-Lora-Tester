@@ -115,6 +115,7 @@ RecoveryHarness.MAX_TOTAL_CASES = 500
 RecoveryHarness.MAX_EXTREME_TOTAL_CASES = 10_000
 RecoveryHarness.MAX_WEIGHTS_PER_ITEM = 100
 RecoveryHarness.MAX_MATRIX_DIMENSION = 65_000
+RecoveryHarness.MAX_MATRIX_PIXELS = 89_000_000
 RecoveryHarness.PAGE_SAFETY_FACTOR = 1.35
 RecoveryHarness.EMBEDDING_TARGET_POSITIVE = "Positive prompt"
 RecoveryHarness.EMBEDDING_TARGET_NEGATIVE = "Negative prompt"
@@ -239,6 +240,20 @@ class ExtremeRunAndMatrixLayoutTests(unittest.TestCase):
         self.assertGreater(height, self.harness.MAX_MATRIX_DIMENSION)
         self.assertEqual(estimated_peak, float("inf"))
 
+    def test_pillow_gallery_pixel_area_limit_is_enforced(self):
+        state = {"matrix_margin": 0, "maximum_row_peak_bytes": 0}
+        rows = [{"width": 3_082, "height": 63_904}]
+
+        width, height, estimated_peak = self.harness._estimate_page_peak(
+            state,
+            rows,
+        )
+
+        self.assertLess(width, self.harness.MAX_MATRIX_DIMENSION)
+        self.assertLess(height, self.harness.MAX_MATRIX_DIMENSION)
+        self.assertGreater(width * height, self.harness.MAX_MATRIX_PIXELS)
+        self.assertEqual(estimated_peak, float("inf"))
+
     def test_reference_row_is_passed_to_every_composed_page(self):
         state = {
             "matrix_margin": 0,
@@ -248,7 +263,7 @@ class ExtremeRunAndMatrixLayoutTests(unittest.TestCase):
         }
         reference_row = {"path": "reference.png", "width": 832, "height": 1_000}
         rows = [
-            {"path": f"row-{index}.png", "width": 3_328, "height": 30_000}
+            {"path": f"row-{index}.png", "width": 1_000, "height": 30_000}
             for index in range(5)
         ]
         composed_references = []
@@ -279,6 +294,57 @@ class ExtremeRunAndMatrixLayoutTests(unittest.TestCase):
 
         self.assertEqual(len(page_paths), 3)
         self.assertEqual(composed_references, [reference_row] * 3)
+
+    def test_pixel_area_limit_splits_pages_before_gradio_reopens_them(self):
+        state = {
+            "matrix_margin": 0,
+            "maximum_row_peak_bytes": 0,
+            "adaptive_ram": False,
+            "minimum_free_bytes": 0,
+        }
+        reference_row = {"path": "reference.png", "width": 3_082, "height": 1_000}
+        rows = [
+            {"path": f"row-{index}.png", "width": 3_082, "height": 10_000}
+            for index in range(5)
+        ]
+        composed_pages = []
+
+        def compose_page(
+            state,
+            rows,
+            width,
+            height,
+            page_number,
+            p,
+            processed,
+            grid_info,
+            reference_row=None,
+        ):
+            composed_pages.append((len(rows), width, height, reference_row))
+            return f"matrix-page-{page_number}.png"
+
+        self.harness._compose_matrix_page = compose_page
+        page_paths = self.harness._build_matrix_pages(
+            state,
+            rows,
+            None,
+            None,
+            "test",
+            reference_row,
+        )
+
+        self.assertEqual(len(page_paths), 3)
+        self.assertEqual([page[0] for page in composed_pages], [2, 2, 1])
+        self.assertTrue(
+            all(
+                width * height <= self.harness.MAX_MATRIX_PIXELS
+                for _, width, height, _ in composed_pages
+            )
+        )
+        self.assertEqual(
+            [page[3] for page in composed_pages],
+            [reference_row] * 3,
+        )
 
 
 class EmbeddingModeTests(unittest.TestCase):

@@ -9,7 +9,7 @@ or more labeled, RAM-aware matrix pages.
 > remain; keep recoverable individual images enabled for important runs and please
 > report reproducible issues.
 
-> **Develop snapshot:** `v0.3.0-alpha.1` includes an unreleased Embedding Test for
+> **Develop snapshot:** `v0.3.0-alpha.2` includes an unreleased Embedding Test for
 > dual-encoder SDXL, Pony, and Illustrious checkpoints. Live UI/preset validation has
 > passed; live image-generation validation is still in progress.
 
@@ -237,7 +237,8 @@ delay.
 ## Output and recovery
 
 Only matrix pages are returned to the Forge gallery. Pages are kept below 65,000
-pixels on either axis and split automatically when necessary. When the default
+pixels on either axis and at or below 89,000,000 total pixels so Pillow/Gradio can
+reopen them safely; they are split automatically when necessary. When the default
 reference generation is enabled, its fixed-seed image appears at the top of every
 page. **Matrix + individual images**
 keeps every final source cell as a lossless PNG with generation metadata. Files are

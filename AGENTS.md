@@ -60,7 +60,8 @@ These instructions apply to the entire Forge Neo LoRA Tester repository.
   requested cells completed without interruption and every matrix page was written
   and validated. On ambiguity, retain sources and the recovery manifest.
 - Preserve automatic multi-page composition and the 65,000-pixel per-axis ceiling
-  unless encoder/gallery testing justifies a deliberate change.
+  plus the 89,000,000-pixel Pillow/Gradio-safe page-area ceiling unless
+  encoder/gallery testing justifies a deliberate change.
 - Normal runs are limited to 500 cells. The explicit Extreme Run Mode raises the
   fixed limit to 10,000; never silently truncate an over-limit request.
 - Reference generation is enabled by default. When present, render the reference as

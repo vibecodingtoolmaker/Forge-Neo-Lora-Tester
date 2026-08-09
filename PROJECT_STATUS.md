@@ -12,8 +12,9 @@ then this document, `README.md`, and the current Git diff before changing code.
 ## Current state
 
 - Current public release: **v0.2.0-beta.1** (GitHub pre-release, 2026-08-05).
-- Current development snapshot: **v0.3.0-alpha.1** on `develop` (unreleased and
+- Current development snapshot: **v0.3.0-alpha.2** on `develop` (unreleased and
   intentionally untagged).
+- Previous development snapshot: **v0.3.0-alpha.1**, commit `7ad1cbc`.
 - Release tag: `v0.2.0-beta.1` -> `main` commit `14c6dae`.
 - Release feature commit on `main`: `c27c621`.
 - Current `develop` release commit: `2bb1bee`.
@@ -85,6 +86,24 @@ then this document, `README.md`, and the current Git diff before changing code.
 - `main`, `develop`, and tag `v0.2.0-beta.1` were pushed atomically.
 - GitHub pre-release published with stress-test and upgrade notes.
 
+## Changes implemented for v0.3.0-alpha.2 (develop, unreleased)
+
+### Pillow/Gradio-safe matrix page area
+
+- Confirmed a post-build Gallery failure on a valid `3082 x 63904` matrix page:
+  196,952,128 pixels exceeded Pillow's 178,956,970-pixel hard error threshold.
+- Added a dynamic ceiling of at most 89,000,000 pixels per matrix page, kept at or
+  below the active Pillow warning limit. The existing 65,000-pixel per-axis ceiling
+  remains independent and unchanged.
+- Page packing now splits before either layout ceiling is crossed and reports each
+  page's dimensions and total pixel count in the console.
+- An individually oversized labeled row is rejected with recovery retained instead
+  of being returned to Gradio as an unsafe disk fallback.
+- Added regression coverage for the exact offending dimensions and area-driven page
+  splitting with the reference repeated on every page.
+- All 29 development tests pass with Forge's Python environment; Ruff, formatting,
+  Forge-Python syntax, JavaScript syntax, and diff checks pass.
+
 ## Changes implemented for v0.3.0-alpha.1 (develop, unreleased)
 
 ### SDXL-compatible Embedding Test
@@ -119,8 +138,8 @@ then this document, `README.md`, and the current Git diff before changing code.
   checks prompt/trigger composition, metadata precedence and fallback, table migration,
   shared range validation, SDXL dual-encoder gating, preset resolution, and real
   Safetensors header filtering.
-- All 27 development tests pass with Forge's Python environment; Forge-Python syntax
-  compilation and isolated Gradio UI construction also pass.
+- All 27 alpha.1 development tests passed with Forge's Python environment;
+  Forge-Python syntax compilation and isolated Gradio UI construction also passed.
 - Live Forge UI validation passed with the real local inventory: 267 Safetensors were
   scanned in about 1.3 seconds, 264 dual-CLIP Embeddings were shown for `xl`, the list
   cleared for `flux`, and it returned to 264 after switching back to `xl`. Live image
@@ -170,8 +189,10 @@ retain sources plus the manifest.
 
 ### Page splitting
 
-`_estimate_page_peak()` rejects pages exceeding 65,000 pixels on either axis.
-`_build_matrix_pages()` adds rows until the next row would cross that dimension or,
+`_estimate_page_peak()` rejects pages exceeding 65,000 pixels on either axis or
+89,000,000 total pixels. The area ceiling stays below Pillow's default large-image
+warning threshold because Gradio reopens returned Gallery files after matrix creation.
+`_build_matrix_pages()` adds rows until the next row would cross a layout limit or,
 if the experimental RAM system is later enabled, the calculated memory budget.
 Splitting is expected behavior and not an OOM indication.
 
@@ -367,6 +388,7 @@ files. See `AGENTS.md` for the release procedure.
 - Normal/Extreme cell limits.
 - Reference-row inclusion in page estimates and every composed page.
 - 65,000-pixel page boundary.
+- Pillow/Gradio-safe 89,000,000-pixel page area and automatic area-based splitting.
 - Embedding prompt/trigger composition, sidecar precedence and filename fallback,
   settings-table migration, dual-encoder compatibility gates, preset resolution,
   Safetensors header discovery, shared weight validation, baseline classification,

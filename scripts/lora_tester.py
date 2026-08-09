@@ -384,6 +384,10 @@ class LoRaTesterScript(scripts.Script):
     MAX_TOTAL_CASES = 500
     MAX_EXTREME_TOTAL_CASES = 10_000
     MAX_MATRIX_DIMENSION = 65_000
+    # Pillow warns above 89,478,485 pixels by default and Gradio reopens every
+    # returned Gallery image through Pillow. Stay slightly below that warning
+    # threshold so a valid matrix cannot fail only while Gradio serializes it.
+    MAX_MATRIX_PIXELS = min(89_000_000, int(Image.MAX_IMAGE_PIXELS or 89_000_000))
     PAGE_SAFETY_FACTOR = 1.35
     LABEL_FONT_DIVISOR = 36
     LABEL_MIN_FONT_SIZE = 14
@@ -3152,7 +3156,12 @@ class LoRaTesterScript(scripts.Script):
         width = max(row['width'] for row in page_rows)
         height = sum(row['height'] for row in page_rows)
         height += state['matrix_margin'] * max(0, len(page_rows) - 1)
-        if width > self.MAX_MATRIX_DIMENSION or height > self.MAX_MATRIX_DIMENSION:
+        pixel_count = width * height
+        if (
+            width > self.MAX_MATRIX_DIMENSION
+            or height > self.MAX_MATRIX_DIMENSION
+            or pixel_count > self.MAX_MATRIX_PIXELS
+        ):
             return width, height, float('inf')
 
         # Four bytes per page pixel is deliberately conservative for an RGB PIL
@@ -3222,6 +3231,15 @@ class LoRaTesterScript(scripts.Script):
                 # The already-labeled row file is itself a valid one-row matrix.
                 # Returning its path requires no additional decoded-image canvas.
                 row = rows[row_offset]
+                row_width, row_height, row_peak = self._estimate_page_peak(
+                    state, [row], None
+                )
+                if row_peak == float('inf'):
+                    raise RuntimeError(
+                        "one labeled matrix row exceeds the safe Gallery page limits "
+                        f"({row_width}x{row_height}, {row_width * row_height:,} pixels); "
+                        "reduce Matrix Columns or the source image resolution"
+                    )
                 fallback_path = Path(row['path'])
                 if getattr(shared.opts, 'grid_save', False):
                     output_dir = Path(p.outpath_grids)
@@ -3236,7 +3254,8 @@ class LoRaTesterScript(scripts.Script):
                 row_offset += 1
                 print(
                     f"[LoRA Tester] Matrix page {page_number}: one-row disk fallback "
-                    f"because the calculated RAM reserve would be crossed"
+                    "because the repeated reference or calculated RAM reserve would "
+                    "cross a page limit"
                 )
                 continue
 
@@ -3245,6 +3264,7 @@ class LoRaTesterScript(scripts.Script):
             )
             print(
                 f"[LoRA Tester] Matrix page {page_number}: {len(selected_rows)} row(s), "
+                f"{width}x{height} ({width * height:,} pixels), "
                 f"estimated peak {estimated_peak / MIB:.0f} MB"
                 f"{' including repeated reference' if reference_row else ''}"
             )
