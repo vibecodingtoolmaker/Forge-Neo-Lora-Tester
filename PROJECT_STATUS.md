@@ -1,6 +1,6 @@
 # Forge Neo LoRA Tester – Project Status
 
-Last updated: 2026-08-13
+Last updated: 2026-08-14
 
 Repository: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester
 
@@ -11,20 +11,37 @@ then this document, `README.md`, and the current Git diff before changing code.
 
 ## Current state
 
-- Current public release: **v0.2.0-beta.1** (GitHub pre-release, 2026-08-05).
-- Current development snapshot: **v0.3.0-alpha.2** on `develop`, commit `df53e09`
-  (unreleased and intentionally untagged).
-- Previous development snapshot: **v0.3.0-alpha.1**, commit `7ad1cbc`.
-- Release tag: `v0.2.0-beta.1` -> `main` commit `14c6dae`.
-- Release feature commit on `main`: `c27c621`.
+- Current public release: **v0.3.0-beta** (GitHub pre-release, 2026-08-14).
+- Release tag: `v0.3.0-beta` -> `main` commit `d67569e`.
+- Release preparation on `develop`: commit `f274768`; the feature snapshot immediately
+  before it is `1a784f1`.
+- Previous public release: **v0.2.0-beta.1**, tag to `main` commit `14c6dae`.
 - The development installation must normally remain on branch `develop`.
-- The code snapshot at `df53e09` is synchronized with `origin/develop`. The
-  2026-08-11 day-end documentation update and the 2026-08-13 per-item-grid work are
-  local and uncommitted until publication is explicitly authorized; always re-check
-  `git status --short --branch`.
+- `develop`, `main`, and the annotated release tag were pushed atomically. The public
+  repository and pre-release are available at the repository URL above.
 - `main` intentionally contains only the public extension package. The test suite
   is intentionally retained on `develop` and omitted from `main`.
 - License: `AGPL-3.0-only`; copyright holder: `vibecodingtoolmaker`.
+
+## Release completion — 2026-08-14
+
+- Public release URL:
+  `https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/releases/tag/v0.3.0-beta`.
+- Remote `main` is `d67569efd04588bf4821d22bf65edddc36c9cc56`.
+- Remote release-preparation `develop` commit is
+  `f274768ff4c8bc2150df96075a3239b30a81eb74`; this status-only follow-up does not
+  change the released product files.
+- The annotated `v0.3.0-beta` tag resolves to the exact `main` commit above.
+- All seven public product/documentation blobs match between `main` and `develop`.
+  `AGENTS.md`, `PROJECT_STATUS.md`, and `tests/` remain development-only.
+- The full 43-test suite passed on `develop`; Python production syntax, JavaScript
+  syntax, Ruff fatal-error checks, and Git diff checks passed for the release tree.
+- GitHub reports the repository as public and the release as a published prerelease.
+  This repository has no GitHub Actions run for the release push.
+- Manual generation remains open for final Gallery delivery, visible Embedding
+  semantics, Hi-Res, img2img, every per-item/combined layout combination, both
+  retention modes, forced multi-page splitting, and broader SDXL/Pony/Illustrious
+  coverage. The release notes preserve this confidence boundary.
 
 ## Proven working functionality
 
@@ -240,7 +257,7 @@ checkpoints is the next expansion after this one-LoRA scaffold is stable.
 - `main`, `develop`, and tag `v0.2.0-beta.1` were pushed atomically.
 - GitHub pre-release published with stress-test and upgrade notes.
 
-## Changes implemented for v0.3.0-alpha.2 (develop, unreleased)
+## Changes implemented for v0.3.0-alpha.2 (included in v0.3.0-beta)
 
 ### Pillow/Gradio-safe matrix page area
 
@@ -258,7 +275,7 @@ checkpoints is the next expansion after this one-LoRA scaffold is stable.
 - All 29 development tests pass with Forge's Python environment; Ruff, formatting,
   Forge-Python syntax, JavaScript syntax, and diff checks pass.
 
-## Changes implemented for v0.3.0-alpha.1 (develop, unreleased)
+## Changes implemented for v0.3.0-alpha.1 (included in v0.3.0-beta)
 
 ### SDXL-compatible Embedding Test
 
@@ -472,7 +489,8 @@ files. See `AGENTS.md` for the release procedure.
   page composition, image finalization, and cleanup.
 - Upgrade testing from both `v0.1.0-beta.1` and a fresh clone of `v0.2.0-beta.1`.
 - Compatibility with future Forge Neo/Gradio/Pillow changes.
-- Post-alpha.2 Gallery delivery of newly area-split pages from a real Embedding run.
+- Post-`v0.3.0-beta` Gallery delivery of newly area-split pages from a real Embedding
+  run.
 - Visual and prompt-semantic confirmation of the Embedding Test in txt2img across
   SDXL, Pony, and Illustrious; one live SDXL-family run has completed through matrix
   persistence but not final Gallery delivery.
@@ -499,7 +517,7 @@ files. See `AGENTS.md` for the release procedure.
    aligned and per-item multi-page splitting with reference on/off.
 6. Repeat the output checks in img2img, with Hi-Res, both retention modes, and once
    with Embedding Test.
-7. Run a short post-alpha.2 txt2img smoke test with one Embedding
+7. Run a short post-`v0.3.0-beta` txt2img smoke test with one Embedding
    whose JSON trigger differs from its filename and one filename-fallback Embedding.
    Route one row to positive (`0`) and one to negative (`1`), then confirm the visible
    effect, console prompt composition, saved matrices, and Gallery delivery.
@@ -593,8 +611,7 @@ files. See `AGENTS.md` for the release procedure.
 ### Documentation and metadata
 
 - `README.md`: public user documentation and known limitations.
-- `CHANGELOG.md`: release history and the current alpha.1/alpha.2 `[Unreleased]`
-  development notes.
+- `CHANGELOG.md`: public release history and the current `[Unreleased]` section.
 - `metadata.ini`: Forge extension description and AGPL identifier.
 - `LICENSE`: complete AGPL-3.0-only license text.
 - `AGENTS.md`: durable development/release/safety rules for future Codex chats.
