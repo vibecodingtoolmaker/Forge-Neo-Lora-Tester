@@ -4,15 +4,15 @@ LoRA Tester compares multiple LoRAs or SDXL-compatible textual inversion embeddi
 and weight ranges with one prompt and one fixed seed. It returns the familiar combined
 matrix by default and can optionally add one labeled, RAM-aware grid per tested item.
 
-> **Project status:** v0.2.0-beta.1 public beta. Extreme Run Mode completed a
+> **Project status:** `v0.3.0-beta` public prerelease. Extreme Run Mode completed a
 > 2,743-cell stress test covering 211 LoRAs with 13 weights each. Known limitations
 > remain; keep recoverable individual images enabled for important runs and please
 > report reproducible issues.
 
-> **Develop snapshot:** `v0.3.0-alpha.2` includes an unreleased Embedding Test for
-> dual-encoder SDXL, Pony, and Illustrious checkpoints. Live UI/preset validation and
-> a txt2img run through matrix persistence have passed; visual prompt semantics and
-> post-alpha.2 Gallery delivery still require confirmation.
+> **Beta confidence boundary:** Embedding Test supports dual-encoder SDXL, Pony, and
+> Illustrious checkpoints. Live UI/preset validation and a txt2img run through matrix
+> persistence have passed; visual prompt semantics, final Gallery delivery, Hi-Res,
+> img2img, and the new per-item/comparison layouts still need broader live validation.
 
 ## Welcome
 
@@ -72,7 +72,7 @@ affiliated with or endorsed by OpenAI.
 - A Forge environment that provides Gradio and Pillow
 
 The extension does not install or download packages by itself. The optional
-`psutil`-based RAM watchdog is disabled for the v0.2.0 release.
+`psutil`-based RAM watchdog is disabled for the `v0.3.0-beta` prerelease.
 
 ## Installation
 
@@ -116,7 +116,7 @@ against the actual generated cell size and can split earlier.
 Generation is blocked while LoRA Tester is enabled and no LoRA is selected.
 Disabling the accordion leaves normal Forge generation unchanged.
 
-### Embedding Test (develop, unreleased)
+### Embedding Test (`v0.3.0-beta`)
 
 1. Choose Forge UI Preset **xl**. This preset covers SDXL, Pony, and Illustrious.
 2. Open and enable **LoRA / Embedding Tester**, then choose **Embedding** as the
@@ -224,10 +224,10 @@ per-iteration random-number generator before every cell so that all LoRA/weight 
 Embedding/weight combinations use the seed of the first generated image. This
 preserves a meaningful visual comparison.
 
-## Adaptive RAM protection (disabled in v0.2.0)
+## Adaptive RAM protection (disabled in `v0.3.0-beta`)
 
-The adaptive RAM watchdog is intentionally disabled for the v0.2.0 release while
-its cross-system thresholds are evaluated further. Its checkbox and budget fields
+The adaptive RAM watchdog is intentionally disabled for the `v0.3.0-beta` prerelease
+while its cross-system thresholds are evaluated further. Its checkbox and budget fields
 are visible but read-only. No RAM-monitor thread is started, and the extension does
 not stop between LoRA cells based on physical-memory or Windows-commit thresholds.
 
@@ -239,7 +239,7 @@ The configured matrix column count remains the width of a logical row, and every
 labeled row is saved separately before the final page is composed. The maximum safe
 image-dimension fallback also remains active.
 
-For v0.2.0, the primary memory-saving mechanism is the enabled-by-default model
+For `v0.3.0-beta`, the primary memory-saving mechanism is the enabled-by-default model
 unload described below. Users should still avoid matrix dimensions that exceed the
 practical RAM and image-size limits of their system.
 
@@ -324,12 +324,15 @@ returned as recovery output and the recovery location is logged.
   fields. Incomplete rows block generation and identify the affected LoRA in the UI
   and console instead of silently using another value.
 
-## Known limitations in v0.2.0-beta.1
+## Known limitations in `v0.3.0-beta`
 
-- The develop-branch Embedding Test is limited to dual-encoder SDXL-compatible model
-  families (SDXL, Pony, and Illustrious). One live txt2img run completed sampling and
-  matrix persistence; post-alpha.2 Gallery delivery, visual prompt semantics, Hi-Res,
-  img2img, and broader model-family validation are still in progress.
+- Embedding Test is limited to dual-encoder SDXL-compatible model families (SDXL,
+  Pony, and Illustrious). One live txt2img run completed sampling and matrix
+  persistence; final Gallery delivery, visual prompt semantics, Hi-Res, img2img, and
+  broader model-family validation are still in progress.
+- Automated and browser UI checks cover the new per-item grids, optional combined
+  overview, aligned row/column layouts, and safe splitting. A complete live-generation
+  matrix covering every output/retention combination remains outstanding.
 - Preset detection is a capability hint for early UI discovery. The loaded checkpoint
   is always the final authority when generation starts.
 

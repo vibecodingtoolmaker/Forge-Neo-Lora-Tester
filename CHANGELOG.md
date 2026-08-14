@@ -7,9 +7,9 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-Current development snapshot: **v0.3.0-alpha.2** on `develop`. This snapshot is not
-tagged or published as a GitHub release; `v0.2.0-beta.1` remains the public release.
-The previous development snapshot, **v0.3.0-alpha.1**, is commit `7ad1cbc`.
+No unreleased changes yet.
+
+## [0.3.0-beta] - 2026-08-14
 
 ### Added
 
@@ -51,12 +51,12 @@ The previous development snapshot, **v0.3.0-alpha.1**, is commit `7ad1cbc`.
 - Restored Forge UI startup on bundled Gradio 4.40: an empty fixed-row Dataframe
   caused the frontend to fail at `Loading`; selection-owned tables now retain the
   compatible dynamic data model while hiding manual row insertion.
-- Release an active Dataframe cell editor on table scroll after committing its current
+- Released an active Dataframe cell editor on table scroll after committing its current
   value, preventing Gradio's virtualizer from pulling the view back to that cell.
-- Hide comparison-capacity guidance while Standard order is active or the combined
+- Hid comparison-capacity guidance while Standard order is active or the combined
   overview is disabled.
 - Prevented Gradio from inserting editable blank rows into the selection-driven LoRA
-  and Embedding settings tables, and discard legacy empty rows server-side.
+  and Embedding settings tables, and discarded legacy empty rows server-side.
 - Added an 89,000,000-pixel matrix-page area ceiling. Large valid grids now split
   before Gradio reopens them through Pillow, preventing a post-build
   `DecompressionBombError` while retaining the existing 65,000-pixel per-axis limit.
@@ -97,6 +97,7 @@ The previous development snapshot, **v0.3.0-alpha.1**, is commit `7ad1cbc`.
 - Optional checkpoint, text-encoder, and VAE unload before matrix creation.
 - Recovery-safe matrix-only output mode.
 
-[Unreleased]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/compare/v0.2.0-beta.1...HEAD
+[Unreleased]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/compare/v0.3.0-beta...HEAD
+[0.3.0-beta]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/compare/v0.2.0-beta.1...v0.3.0-beta
 [0.2.0-beta.1]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/compare/v0.1.0-beta.1...v0.2.0-beta.1
 [0.1.0-beta.1]: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester/releases/tag/v0.1.0-beta.1
