@@ -1,6 +1,6 @@
 # Forge Neo LoRA Tester – Project Status
 
-Last updated: 2026-08-09
+Last updated: 2026-08-13
 
 Repository: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester
 
@@ -12,17 +12,16 @@ then this document, `README.md`, and the current Git diff before changing code.
 ## Current state
 
 - Current public release: **v0.2.0-beta.1** (GitHub pre-release, 2026-08-05).
-- Current development snapshot: **v0.3.0-alpha.2** on `develop` (unreleased and
-  intentionally untagged).
+- Current development snapshot: **v0.3.0-alpha.2** on `develop`, commit `df53e09`
+  (unreleased and intentionally untagged).
 - Previous development snapshot: **v0.3.0-alpha.1**, commit `7ad1cbc`.
 - Release tag: `v0.2.0-beta.1` -> `main` commit `14c6dae`.
 - Release feature commit on `main`: `c27c621`.
-- Current `develop` release commit: `2bb1bee`.
-- Current `develop` feature commit: `af2432a`.
 - The development installation must normally remain on branch `develop`.
-- At the start of this handoff update, `develop` was clean and synchronized with
-  `origin/develop`. Re-check `git status --short --branch`; the new handoff files
-  may still be local and uncommitted.
+- The code snapshot at `df53e09` is synchronized with `origin/develop`. The
+  2026-08-11 day-end documentation update and the 2026-08-13 per-item-grid work are
+  local and uncommitted until publication is explicitly authorized; always re-check
+  `git status --short --branch`.
 - `main` intentionally contains only the public extension package. The test suite
   is intentionally retained on `develop` and omitted from `main`.
 - License: `AGPL-3.0-only`; copyright holder: `vibecodingtoolmaker`.
@@ -45,8 +44,163 @@ then this document, `README.md`, and the current Git diff before changing code.
 - Optional checkpoint, text encoder, and VAE unload before matrix composition;
   enabled by default and the main practical RAM-saving mechanism.
 - Multiple matrix pages with compact labels and automatic page packing.
+- Matrix pages split before either the 65,000-pixel axis ceiling or the dynamic
+  89,000,000-pixel area ceiling is crossed, keeping saved pages safe for Pillow and
+  Gradio to reopen.
 - Individual images are retained in dedicated txt2img/img2img run directories when
   the safe output-retention mode is selected.
+- Live Embedding inventory and preset switching work before checkpoint load. A real
+  txt2img Embedding run completed sampling and saved its matrix pages; visual prompt
+  semantics and the post-alpha.2 Gallery handoff still require focused confirmation.
+
+## Day-end status — 2026-08-11
+
+### Confirmed today
+
+- `develop` code is synchronized with `origin/develop` at `df53e09`
+  (`v0.3.0-alpha.2`); `main`, tags, and the public `v0.2.0-beta.1` release are
+  intentionally unchanged.
+- A real Embedding Test reached `Total progress: 9275/9275` in about 17 minutes and
+  completed matrix construction and file output.
+- The run then exposed a delivery-only failure when Gradio reopened a
+  `3082 x 63904` page (196,952,128 pixels) through Pillow. The generated images and
+  matrices themselves were retained.
+- The failure was root-caused to total page area rather than Embedding injection or
+  sampling. `v0.3.0-alpha.2` now splits pages before the safe area ceiling as well as
+  the existing per-axis ceiling.
+- The previous extreme LoRA test did not raise the hard error because its three-column
+  page was narrower; the same page height therefore stayed below Pillow's hard limit.
+  This was a latent matrix-layout issue, not an Embedding-only defect.
+
+### Confidence boundary for the next session
+
+- Proven in a live Forge run: Embedding discovery, selection, processing startup,
+  complete sampling, matrix composition, and matrix file persistence.
+- Still to confirm manually: post-alpha.2 Gallery delivery, visible Embedding effect,
+  JSON trigger versus filename fallback, mixed `0`/`1` prompt targets, Hi-Res prompt
+  injection, img2img, and broader SDXL/Pony/Illustrious coverage.
+
+## Day-end handoff — 2026-08-13
+
+### Exact Git state
+
+- Worktree: `H:\DEVELOPMENT-sd-webui-forge-neo\extensions\Forge-Neo-Lora-Tester`.
+- Branch: `develop`; `HEAD` and `origin/develop` are still `df53e09`
+  (`Add v0.3.0-alpha.2 matrix page safeguards`).
+- The complete 2026-08-13 change set is local and uncommitted. Modified files:
+  `CHANGELOG.md`, `PROJECT_STATUS.md`, `README.md`,
+  `javascript/lora_tester_dataframe.js`, `scripts/lora_tester.py`, `style.css`, and
+  `tests/test_lora_tester_recovery.py`.
+- No commit, tag, push, release, Forge-core edit, or change to `main` was made.
+
+### Implemented locally
+
+- Per-item grids are now optional and disabled by default. With them disabled, the
+  former output path remains: retained source images according to the retention mode
+  plus one required combined matrix. Enabling them unlocks the option to include or
+  omit the combined overview.
+- The combined matrix now offers Standard order plus aligned comparison layouts:
+  LoRAs/Embeddings as rows (weights side-by-side) or as columns (weights underneath).
+  Comparison layouts require identical weight sequences, start with a ten-item limit,
+  and split the weight axis into aligned safe pages when necessary.
+- UI capacity guidance follows the current Forge width/height, selection count,
+  reference, legend, and margin settings. It reports safe per-page counts and a
+  symmetric 0.5-step range hint; actual generated/Hi-Res cell dimensions remain the
+  final authority. The guidance is hidden for Standard order and whenever the combined
+  overview is disabled.
+- Per-item grids ignore the Standard combined-matrix column setting and keep all safe
+  weights for one LoRA/Embedding in a single horizontal row. Overwide rows split into
+  additional safe one-row pages.
+- Selection-driven Dataframes keep Gradio's compatible dynamic data model while hiding
+  manual row insertion and filtering empty rows server-side. Scrolling commits and
+  releases an active editor so the virtualized table no longer jumps back to its cell.
+- Duplicate display names remain separate because grouping uses the selected relative
+  model path, while filenames include an ordinal and a sanitized display label.
+- The fixed-seed reference is repeated on every individual and combined page. All
+  outputs share the existing 65,000-axis/89M-area limits and Matrix-only cleanup is
+  allowed only after every requested output page validates.
+- Automated coverage is currently 43 passing tests. Manual Forge Gallery validation
+  is still required for legacy output, per-item/combined combinations, both comparison
+  orientations, forced aligned splitting, Hi-Res, both retention modes, and
+  txt2img/img2img.
+
+### Root causes found and fixed
+
+- The empty visible settings row came from Gradio's dynamic Dataframe placeholder,
+  not from a real selected LoRA. Empty rows are now hidden in the browser and ignored
+  by server-side normalization.
+- Changing an empty table to `row_count=(0, "fixed")` made Forge stop at `Loading`.
+  Forge's bundled Gradio 4.40 frontend expected row data and failed while slicing an
+  undefined value. The compatible dynamic model is therefore deliberately retained;
+  only its manual row-add UI is suppressed.
+- The table scroll jump was caused by the virtualized Dataframe retaining the active
+  editor and restoring its cell into view. A wheel action now commits and blurs that
+  editor before scrolling continues.
+
+### Verification and confidence boundary
+
+- The full extension suite passes all 43 tests in the Forge venv.
+- A stricter `python -S` run proves the recovery/UI tests that do not need Forge
+  packages, but the complete discovery run is not dependency-free: it stops when
+  `tests/test_model_family.py` imports `torch`. This is a test-portability follow-up,
+  not a failure in the new matrix tests.
+- Python syntax compilation, Ruff fatal-error checks, JavaScript syntax checking, and
+  `git diff --check` pass. Git reports only the existing LF-to-CRLF conversion warning
+  for `style.css`.
+- A real Forge browser smoke test loaded the full UI, showed capacity guidance only
+  for the two comparison orientations, hid it again in Standard order, and produced no
+  LoRA Tester console error.
+- A focused live Dataframe test scrolled from `scrollTop 977` to `327` and remained at
+  `327` after 1.8 seconds; the former focus-driven return jump did not recur.
+- Not yet proven by a complete live generation: Gallery order and visual layout for
+  legacy output, per-item grids with combined overview on/off, both comparison
+  orientations, forced safe splitting, reference on/off, Hi-Res, Matrix-only cleanup,
+  both retention modes, and txt2img/img2img. Preserve this distinction in release
+  notes; automated and browser UI checks do not prove the generation result.
+
+### Tomorrow's primary task: one LoRA across multiple checkpoints
+
+Build the first scaffold around exactly one selected LoRA and up to ten selected
+checkpoints. The existing weight parser remains the shared axis, including ranges such
+as `-5:5:0.5` (21 weights). Every checkpoint must receive the same prompt, resolved
+seed, sampler, resolution, and exact weight sequence.
+
+Required first-stage behavior:
+
+1. Snapshot the complete original Forge model selection needed for reliable restore.
+2. Preflight the LoRA/checkpoint pairs and show compatible, uncertain, or incompatible
+   status before or at model load; never infer compatibility from filenames alone.
+3. Load each checkpoint once, perform the authoritative runtime LoRA-key compatibility
+   check, generate every weight for that checkpoint, and persist the completed row.
+4. On incompatibility or generation failure, record and label the skipped/failed row
+   without discarding already completed rows or their source images.
+5. Build one horizontal full-resolution weight row per checkpoint and, when requested,
+   a combined overview with checkpoints vertically and weights horizontally.
+6. Restore the original Forge selection in a `finally` path even after interruption or
+   failure; let Forge own the actual model loading and offload lifecycle.
+
+Compatibility should be layered:
+
+- Use LoRA embedded/sidecar metadata such as `ss_base_model_version`,
+  `modelspec.architecture`, `ss_network_module`, or Civitai `baseModel` only as an
+  early family hint.
+- Classify checkpoint architecture from its Safetensors tensor names/shapes without
+  decoding the weights. Embedded checkpoint metadata is too sparse to be the sole
+  decision source.
+- Once a checkpoint is loaded, reuse Forge's own LoRA key mapping as the final
+  authority. A metadata-unknown pair that maps successfully is valid; a hard family
+  mismatch or failed runtime mapping is skipped and retained in the manifest.
+- Relevant read-only Forge references are `modules/sd_models.py` (checkpoint/header
+  metadata), `backend/loader.py` (architecture and engine selection), and
+  `extensions-builtin/sd_forge_lora/networks.py` (loaded-model key matching). Keep all
+  new implementation inside this extension.
+
+The target 10-checkpoint by 21-weight overview cannot generally remain full resolution:
+at typical source sizes it exceeds the existing 89M-pixel Gallery boundary before
+labels are added. Keep full-resolution per-checkpoint rows, then design a downscaled
+overview (and later possibly tiled/zoomable output) without weakening the 65,000-axis,
+89M-area, disk-first, or recovery guarantees. Multiple LoRAs across multiple
+checkpoints is the next expansion after this one-LoRA scaffold is stable.
 
 ## Changes implemented on 2026-08-05
 
@@ -142,25 +296,31 @@ then this document, `README.md`, and the current Git diff before changing code.
   Forge-Python syntax compilation and isolated Gradio UI construction also passed.
 - Live Forge UI validation passed with the real local inventory: 267 Safetensors were
   scanned in about 1.3 seconds, 264 dual-CLIP Embeddings were shown for `xl`, the list
-  cleared for `flux`, and it returned to 264 after switching back to `xl`. Live image
-  generation remains outstanding.
+  cleared for `flux`, and it returned to 264 after switching back to `xl`.
+- A live txt2img Embedding run subsequently completed sampling and saved matrix pages.
+  Gallery preprocessing then exposed the page-area issue fixed in alpha.2; visual and
+  prompt-semantic validation remains incomplete.
 - The real 264-item compatible inventory resolves 165 triggers from `.json` and 99
   from filename fallback. Four metadata triggers intentionally differ from their local
   filenames and therefore exercise the separate technical-token/activation-phrase path.
 
 ## Planned feature roadmap
 
-1. **Per-LoRA matrix output**
-   - Add output choices for one combined matrix plus one matrix per tested LoRA, or
-     only the individual per-LoRA matrices without the combined matrix.
-2. **LoRAs across multiple checkpoints**
-   - Test one or more LoRAs against multiple selected checkpoints.
-   - Intended matrix layout: LoRAs on the X axis and checkpoints on the Y axis.
-3. **Embedding Test follow-up**
+1. **LoRAs across multiple checkpoints**
+   - First scaffold: exactly one LoRA, up to ten checkpoints, and one identical user
+     weight sequence per checkpoint.
+   - Load each checkpoint once and create one horizontal weight row per checkpoint.
+   - Combined layout: checkpoints on the Y axis and weights on the X axis; retain
+     full-resolution per-checkpoint rows even when the combined overview must be
+     downscaled or split.
+   - Add layered metadata/header/runtime compatibility checks, persistent failed-row
+     status, and fail-safe restoration of the original Forge model selection.
+   - Expand to multiple LoRAs only after the sequential model lifecycle is proven.
+2. **Embedding Test follow-up**
    - Manually validate and stabilize the new SDXL/Pony/Illustrious implementation,
      then revisit broader model-family support if Forge expands compatible textual
      inversion handling.
-4. **Multiple images/seeds per tested LoRA**
+3. **Multiple images/seeds per tested LoRA**
    - Add incremental or random seed generation for several images per LoRA.
    - Offer separate per-seed matrices in addition to the aggregate comparison.
 
@@ -280,12 +440,11 @@ files. See `AGENTS.md` for the release procedure.
      trigger values, and table rows are dynamic and should not be persisted blindly.
    - Backlog: persist safe static txt2img/img2img settings separately.
 
-9. **Extreme one-row fallback edge case**
-   - If one prebuilt row alone exceeds the 65,000-pixel limit, or if a future enabled
-     RAM budget rejects even one row, the existing disk fallback returns that row
-     directly. In that rare path the repeated reference is not composed into it.
-   - Typical tested sizes do not hit this path. A future fix should reflow the source
-     cells into fewer columns rather than returning an oversized row.
+9. **Extreme one-row reflow is not implemented**
+   - If one labeled row alone exceeds an active page limit, alpha.2 rejects it safely
+     and retains recovery data instead of returning an unsafe image to Gradio.
+   - A future enhancement could reflow that row into fewer columns and still produce a
+     deliverable matrix page automatically.
 
 10. **No resume-after-restart workflow**
     - Manifests and sources preserve recovery data after interruption, but there is no
@@ -313,32 +472,57 @@ files. See `AGENTS.md` for the release procedure.
   page composition, image finalization, and cleanup.
 - Upgrade testing from both `v0.1.0-beta.1` and a fresh clone of `v0.2.0-beta.1`.
 - Compatibility with future Forge Neo/Gradio/Pillow changes.
-- Embedding Test in live txt2img and img2img with SDXL, Pony, and Illustrious.
-- Positive and negative Embedding targets with Hi-Res fix enabled and disabled.
+- Post-alpha.2 Gallery delivery of newly area-split pages from a real Embedding run.
+- Visual and prompt-semantic confirmation of the Embedding Test in txt2img across
+  SDXL, Pony, and Illustrious; one live SDXL-family run has completed through matrix
+  persistence but not final Gallery delivery.
+- Embedding Test in live img2img.
+- Mixed positive and negative Embedding targets with Hi-Res fix enabled and disabled.
 - Mixed Embedding folder layouts, duplicate filename stems, incompatible SD1.x
   embeddings, model switching followed by refresh, and multi-page Embedding runs.
 
 ## Recommended next steps
 
-1. Run short SDXL/Pony/Illustrious Embedding smoke tests in txt2img and img2img,
-   covering positive/negative prompts, weight ranges, reference on/off, Hi-Res fix,
-   model unload on/off, and both output-retention modes.
-2. Fix the eager LoRA-system import and eliminate the misleading startup warning.
-3. Run a short Forge smoke test after that fix: normal generation with the tester
+1. Before implementing cross-checkpoint generation, identify the exact Forge-owned
+   reload API and processing boundary that can switch models sequentially without a
+   second persistent model or recursive processing call. Add pure run-plan, family-
+   classifier, manifest, and restore-path tests first.
+2. Add the one-LoRA/up-to-ten-checkpoint selector and shared-weight run plan described
+   in the 2026-08-13 handoff. Keep compatibility classification extension-local and
+   make Forge's loaded-model key mapping authoritative.
+3. Implement sequential checkpoint rows, immediate disk persistence, failed-row
+   labeling, combined overview scaling/splitting, and unconditional original-model
+   restoration. Verify one same-family pair before widening coverage.
+4. Run a short txt2img test with three LoRAs and `0:5:0.5`: first in legacy output,
+   then with LoRAs as rows and as columns. Confirm aligned weights and Gallery order.
+5. Enable per-item grids, test the combined matrix on/off dependency, then force
+   aligned and per-item multi-page splitting with reference on/off.
+6. Repeat the output checks in img2img, with Hi-Res, both retention modes, and once
+   with Embedding Test.
+7. Run a short post-alpha.2 txt2img smoke test with one Embedding
+   whose JSON trigger differs from its filename and one filename-fallback Embedding.
+   Route one row to positive (`0`) and one to negative (`1`), then confirm the visible
+   effect, console prompt composition, saved matrices, and Gallery delivery.
+8. Repeat with Hi-Res fix and deliberately force at least two matrix pages to verify
+   area-driven splitting and the repeated reference in the live Gallery.
+9. Extend the smoke test to img2img and representative SDXL, Pony, and Illustrious
+   checkpoints, then cover model unload on/off and both output-retention modes.
+10. Fix the eager LoRA-system import and eliminate the misleading startup warning.
+11. Run a short Forge smoke test after that fix: normal generation with the tester
    disabled, one baseline + two LoRAs, model unload on/off, txt2img and img2img.
-4. Visually verify repeated references on at least a two-page matrix with legends
+12. Visually verify repeated references on at least a two-page matrix with legends
    both enabled and disabled.
-5. Add tests for the visible over-limit block in `before_process()`, not only the
+13. Add tests for the visible over-limit block in `before_process()`, not only the
    pure 500/10,000 limit helper.
-6. Test 65,000-pixel page encoding in every supported `grid_format`; reduce the
+14. Test 65,000-pixel page encoding in every supported `grid_format`; reduce the
    ceiling if any encoder or gallery rejects it.
-7. Fix the margin/date-folder beta limitations.
-8. Design static settings persistence without persisting dynamic selections.
-9. Add optional preflight information (planned cells, approximate rows/pages, and a
+15. Fix the margin/date-folder beta limitations.
+16. Design static settings persistence without persisting dynamic selections.
+17. Add optional preflight information (planned cells, approximate rows/pages, and a
    conservative disk/time warning) without adding another user-editable cell limit.
-10. Revisit adaptive RAM protection only after gathering measurements from different
+18. Revisit adaptive RAM protection only after gathering measurements from different
    RAM sizes, model families, pagefiles, and loading strategies.
-11. Consider manifest-based resume support for multi-hour Extreme Run jobs.
+19. Consider manifest-based resume support for multi-hour Extreme Run jobs.
 
 ## Relevant files and functions
 
@@ -367,6 +551,14 @@ files. See `AGENTS.md` for the release procedure.
 - `_unload_forge_model_for_matrix()`: checkpoint/text encoder/VAE unload.
 - `_finalize_individual_images()`: moves retained source PNGs to final run folders.
 - `_write_manifest()`: persistent recovery state.
+- `_group_comparison_cells()`: groups weights by relative item path without merging
+  duplicate display names.
+- `_comparison_capacity()`: safe one-page aligned weight capacity from resolution,
+  item count, legend, margin, and reference geometry.
+- `_build_comparison_matrix_pages()`: aligned row/column layout and weight-axis parts.
+- `_build_per_item_matrix_pages()`: horizontal per-item rows and safe width-based parts.
+- `_build_requested_matrices()`: emits per-item pages first and the optional combined
+  overview last.
 - `_build_row_strips()`: creates labeled comparison/reference row PNGs on disk.
 - `_estimate_page_peak()`: dimension and conservative memory estimate.
 - `_build_matrix_pages()`: page packing and repeated-reference propagation.
@@ -379,6 +571,7 @@ files. See `AGENTS.md` for the release procedure.
 - Places the caret at the start without selecting/deleting the cell value.
 - Protects the read-only LoRA-name column.
 - Handles Tab/Shift+Tab/Enter/arrow navigation and avoids focus reclaim loops.
+- Commits and releases an active cell editor before table scrolling.
 
 ### `tests/test_lora_tester_recovery.py` (`develop` only)
 
@@ -389,6 +582,9 @@ files. See `AGENTS.md` for the release procedure.
 - Reference-row inclusion in page estimates and every composed page.
 - 65,000-pixel page boundary.
 - Pillow/Gradio-safe 89,000,000-pixel page area and automatic area-based splitting.
+- Empty Dataframe-row filtering, optional per-item output, combined-output dependency,
+  duplicate-label separation, horizontal per-item rows and safe splitting, aligned
+  row/column layout, capacity hints, and output order.
 - Embedding prompt/trigger composition, sidecar precedence and filename fallback,
   settings-table migration, dual-encoder compatibility gates, preset resolution,
   Safetensors header discovery, shared weight validation, baseline classification,
@@ -397,7 +593,8 @@ files. See `AGENTS.md` for the release procedure.
 ### Documentation and metadata
 
 - `README.md`: public user documentation and known limitations.
-- `CHANGELOG.md`: release history; current empty `[Unreleased]` section.
+- `CHANGELOG.md`: release history and the current alpha.1/alpha.2 `[Unreleased]`
+  development notes.
 - `metadata.ini`: Forge extension description and AGPL identifier.
 - `LICENSE`: complete AGPL-3.0-only license text.
 - `AGENTS.md`: durable development/release/safety rules for future Codex chats.

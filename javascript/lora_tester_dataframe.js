@@ -13,6 +13,8 @@
     const EDITOR_SELECTOR = 'input[role="textbox"]';
     const EDIT_PENDING_ATTRIBUTE = "data-lora-tester-edit-pending";
     const PRESET_BRIDGES = ["txt2img", "img2img"];
+    const DIMENSION_BRIDGES = ["txt2img", "img2img"];
+    const dimensionTimers = new Map();
 
     function eventElement(event) {
         return event.target instanceof Element ? event.target : null;
@@ -113,6 +115,20 @@
         }
     }
 
+    function releaseEditorForScroll(event) {
+        const root = event.currentTarget;
+        const editor = document.activeElement;
+        if (!(editor instanceof HTMLInputElement) || !root.contains(editor)) {
+            return;
+        }
+
+        // Gradio's virtualized Dataframe keeps a focused editor inside the
+        // viewport.  When the user scrolls, commit the current input state and
+        // release focus before the virtualizer can pull the table back to it.
+        editor.dispatchEvent(new Event("change", {bubbles: true}));
+        editor.blur();
+    }
+
     function handleTableKeydown(event) {
         const root = event.currentTarget;
         const cell = selectedBodyCell(root);
@@ -150,6 +166,30 @@
         });
     }
 
+    function hideDynamicBlankRows(root) {
+        root.querySelectorAll("tbody tr").forEach((row) => {
+            const text = row.textContent?.trim() || "";
+            const editorHasValue = Array.from(
+                row.querySelectorAll("input, textarea"),
+            ).some((editor) => editor.value.trim() !== "");
+            row.classList.toggle(
+                "lora-tester-empty-dataframe-row",
+                text === "" && !editorHasValue,
+            );
+        });
+    }
+
+    function hideRowInsertionControls(root) {
+        root.querySelectorAll("button").forEach((button) => {
+            const label = (button.textContent || button.getAttribute("aria-label") || "")
+                .trim()
+                .toLowerCase();
+            if (label === "new row") {
+                button.hidden = true;
+            }
+        });
+    }
+
     function installDataframeBehavior() {
         for (const id of DATAFRAME_IDS) {
             const root = gradioApp().querySelector(`#${id}`);
@@ -157,6 +197,8 @@
                 continue;
             }
 
+            hideDynamicBlankRows(root);
+            hideRowInsertionControls(root);
             markReadOnlyCells(root);
             if (root.dataset.loraTesterCaretInstalled === "true") {
                 continue;
@@ -166,6 +208,10 @@
             root.addEventListener("click", handleCellClick);
             root.addEventListener("dblclick", protectReadOnlyColumn, true);
             root.addEventListener("keydown", handleTableKeydown, true);
+            root.addEventListener("wheel", releaseEditorForScroll, {
+                capture: true,
+                passive: true,
+            });
         }
     }
 
@@ -231,12 +277,65 @@
         syncForgePreset();
     }
 
+    function syncComparisonDimensions(mode, force = false) {
+        const width = gradioApp().querySelector(`#${mode}_width input`)?.value;
+        const height = gradioApp().querySelector(`#${mode}_height input`)?.value;
+        const widthBridge = gradioApp().querySelector(
+            `#${mode}_lora_tester_comparison_width input`,
+        );
+        const heightBridge = gradioApp().querySelector(
+            `#${mode}_lora_tester_comparison_height input`,
+        );
+        const refresh = gradioApp().querySelector(
+            `#${mode}_lora_tester_comparison_refresh`,
+        );
+        if (!width || !height || !widthBridge || !heightBridge || !refresh) {
+            return;
+        }
+        if (
+            !force
+            && widthBridge.value === width
+            && heightBridge.value === height
+        ) {
+            return;
+        }
+        setInputValue(widthBridge, width);
+        setInputValue(heightBridge, height);
+        setTimeout(() => refresh.click(), 0);
+    }
+
+    function scheduleDimensionSync(mode) {
+        clearTimeout(dimensionTimers.get(mode));
+        dimensionTimers.set(
+            mode,
+            setTimeout(() => syncComparisonDimensions(mode), 150),
+        );
+    }
+
+    function installDimensionBridges() {
+        for (const mode of DIMENSION_BRIDGES) {
+            for (const dimension of ["width", "height"]) {
+                const root = gradioApp().querySelector(`#${mode}_${dimension}`);
+                if (!root || root.dataset.loraTesterDimensionInstalled === "true") {
+                    continue;
+                }
+                root.dataset.loraTesterDimensionInstalled = "true";
+                const schedule = () => scheduleDimensionSync(mode);
+                root.addEventListener("input", schedule);
+                root.addEventListener("change", schedule);
+            }
+            syncComparisonDimensions(mode);
+        }
+    }
+
     onUiLoaded(() => {
         installDataframeBehavior();
         installPresetBridge();
+        installDimensionBridges();
     });
     onAfterUiUpdate(() => {
         installDataframeBehavior();
         installPresetBridge();
+        installDimensionBridges();
     });
 })();

@@ -1,8 +1,8 @@
 # LoRA Tester for Forge Neo
 
 LoRA Tester compares multiple LoRAs or SDXL-compatible textual inversion embeddings
-and weight ranges with one prompt and one fixed seed. It returns the results as one
-or more labeled, RAM-aware matrix pages.
+and weight ranges with one prompt and one fixed seed. It returns the familiar combined
+matrix by default and can optionally add one labeled, RAM-aware grid per tested item.
 
 > **Project status:** v0.2.0-beta.1 public beta. Extreme Run Mode completed a
 > 2,743-cell stress test covering 211 LoRAs with 13 weights each. Known limitations
@@ -10,8 +10,9 @@ or more labeled, RAM-aware matrix pages.
 > report reproducible issues.
 
 > **Develop snapshot:** `v0.3.0-alpha.2` includes an unreleased Embedding Test for
-> dual-encoder SDXL, Pony, and Illustrious checkpoints. Live UI/preset validation has
-> passed; live image-generation validation is still in progress.
+> dual-encoder SDXL, Pony, and Illustrious checkpoints. Live UI/preset validation and
+> a txt2img run through matrix persistence have passed; visual prompt semantics and
+> post-alpha.2 Gallery delivery still require confirmation.
 
 ## Welcome
 
@@ -45,6 +46,11 @@ affiliated with or endorsed by OpenAI.
 - Uses the first generated seed for every comparison cell
 - Generates a fixed-seed reference image without a tested LoRA by default
 - Repeats that reference image at the top of every matrix page
+- Optionally creates a separate horizontal weight row for every tested LoRA or
+  Embedding, split into further one-row pages only when a safety limit requires it
+- Keeps the combined matrix mandatory in legacy output mode; with per-item grids it
+  becomes an optional additional output
+- Offers aligned comparison layouts with every LoRA in one row or one column
 - Offers an explicit Extreme Run Mode for up to 10,000 matrix cells
 - Writes completed cells to disk instead of retaining decoded images in RAM
 - Builds labeled row strips on disk before composing the final matrix
@@ -92,7 +98,20 @@ The **LoRA / Embedding Tester** accordion is available in both txt2img and img2i
 7. Choose an output-retention mode. Keeping individual images is the safe default.
 8. Keep model unloading enabled so matrix creation can use the released RAM.
 9. Enable **Extreme Run Mode** only for deliberately large jobs above 500 cells.
-10. Generate normally. The gallery returns matrix pages rather than individual cells.
+10. Leave **Create one grid per tested LoRA or Embedding** disabled for the former
+    behavior: retained individual images according to the retention option and one
+    combined matrix. Enable it for per-item grids; **Also create the combined
+    overview** then becomes selectable.
+11. For direct comparisons, choose **LoRAs as rows** to place one LoRA's weights next
+    to each other, or **LoRAs as columns** to place them underneath each other. These
+    layouts support at most ten selected items and require identical weight sequences.
+12. Generate normally. Per-item pages are returned first; an enabled combined matrix
+    follows them.
+
+The comparison-capacity line uses the current Forge width/height, selected-item count,
+legend, margin, and reference settings. It reports a safe maximum image count per item
+and a symmetric `0.5`-step range such as `-5:5:0.5`. Hi-Res output is checked again
+against the actual generated cell size and can split earlier.
 
 Generation is blocked while LoRA Tester is enabled and no LoRA is selected.
 Disabling the accordion leaves normal Forge generation unchanged.
@@ -154,8 +173,10 @@ Use the weight columns as follows:
 
 One click opens an editable cell and places the caret at the beginning without
 selecting or clearing its contents. Tab, Shift+Tab, Enter, and arrow-key cell
-navigation activate the next editable cell. The LoRA identifier column rejects
-typing, deletion, Enter, and double-click editing.
+navigation activate the next editable cell. Scrolling the table commits the current
+cell state and releases its editor so Gradio does not pull the scroll position back to
+that cell. The LoRA identifier column rejects typing, deletion, Enter, and double-click
+editing.
 
 ## Weight specifications
 
@@ -236,13 +257,18 @@ delay.
 
 ## Output and recovery
 
-Only matrix pages are returned to the Forge gallery. Pages are kept below 65,000
+Only matrix pages are returned to the Forge gallery. The combined matrix remains the
+default and required output while per-item grids are disabled. Enabling per-item grids
+makes the combined matrix optional. Any logical grid that exceeds a safety limit is
+delivered as multiple pages. A per-item grid always lays out that item's weights in one
+horizontal row and ignores the Standard combined matrix column setting; an overwide
+row is split into additional safe one-row pages. Aligned comparison layouts preserve
+the LoRA/weight axis and start a new aligned part before it becomes unsafe. Every page stays below 65,000
 pixels on either axis and at or below 89,000,000 total pixels so Pillow/Gradio can
-reopen them safely; they are split automatically when necessary. When the default
-reference generation is enabled, its fixed-seed image appears at the top of every
-page. **Matrix + individual images**
-keeps every final source cell as a lossless PNG with generation metadata. Files are
-grouped per run and use names such as:
+reopen it safely. When the default reference generation is enabled, its fixed-seed
+image appears at the top of every requested page. **Matrix + individual images** keeps
+every final source cell as a lossless PNG with generation metadata.
+Files are grouped per run and use names such as:
 
 ```text
 0001_seed-123456_MyLora (weight 0.8).png
@@ -301,8 +327,9 @@ returned as recovery output and the recovery location is logged.
 ## Known limitations in v0.2.0-beta.1
 
 - The develop-branch Embedding Test is limited to dual-encoder SDXL-compatible model
-  families (SDXL, Pony, and Illustrious) and still requires live image-generation
-  validation.
+  families (SDXL, Pony, and Illustrious). One live txt2img run completed sampling and
+  matrix persistence; post-alpha.2 Gallery delivery, visual prompt semantics, Hi-Res,
+  img2img, and broader model-family validation are still in progress.
 - Preset detection is a capability hint for early UI discovery. The loaded checkpoint
   is always the final authority when generation starts.
 

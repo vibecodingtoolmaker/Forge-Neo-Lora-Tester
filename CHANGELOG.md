@@ -13,6 +13,14 @@ The previous development snapshot, **v0.3.0-alpha.1**, is commit `7ad1cbc`.
 
 ### Added
 
+- Added opt-in separate grids per tested LoRA or Embedding, in selection order.
+- Added an output dependency: the combined matrix remains required while per-item
+  grids are disabled, then becomes optional when per-item grids are enabled.
+- Added aligned combined-matrix comparison layouts with LoRAs as rows or columns,
+  dynamic safe-capacity guidance, 0.5-step symmetric range hints, an initial ten-item
+  limit, and automatic aligned splitting across safe pages.
+- Made every per-LoRA/per-Embedding grid a single horizontal weight row, independent
+  of the Standard combined-matrix column setting, with safe one-row page splitting.
 - Added an Embedding Test mode for textual inversion embeddings compatible with both
   text encoders of the loaded SDXL, Pony, or Illustrious checkpoint.
 - Added folder selection, global and per-Embedding weight ranges, Start/End placement,
@@ -29,6 +37,8 @@ The previous development snapshot, **v0.3.0-alpha.1**, is commit `7ad1cbc`.
 
 ### Changed
 
+- Applied repeated-reference, automatic page splitting, Gallery-safe area limits,
+  disk spooling, and Matrix-only recovery validation to every requested grid output.
 - Generalized fixed-seed matrix, disk-spooling, model-unload, output-retention, and
   recovery handling so LoRA and Embedding comparisons share the same safety path.
 - Kept the loaded checkpoint and its existing Forge embedding databases as the final
@@ -38,6 +48,15 @@ The previous development snapshot, **v0.3.0-alpha.1**, is commit `7ad1cbc`.
 
 ### Fixed
 
+- Restored Forge UI startup on bundled Gradio 4.40: an empty fixed-row Dataframe
+  caused the frontend to fail at `Loading`; selection-owned tables now retain the
+  compatible dynamic data model while hiding manual row insertion.
+- Release an active Dataframe cell editor on table scroll after committing its current
+  value, preventing Gradio's virtualizer from pulling the view back to that cell.
+- Hide comparison-capacity guidance while Standard order is active or the combined
+  overview is disabled.
+- Prevented Gradio from inserting editable blank rows into the selection-driven LoRA
+  and Embedding settings tables, and discard legacy empty rows server-side.
 - Added an 89,000,000-pixel matrix-page area ceiling. Large valid grids now split
   before Gradio reopens them through Pillow, preventing a post-build
   `DecompressionBombError` while retaining the existing 65,000-pixel per-axis limit.

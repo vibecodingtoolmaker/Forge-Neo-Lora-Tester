@@ -398,6 +398,11 @@ class LoRaTesterScript(scripts.Script):
     ROOT_EMBEDDING_FOLDER = "__lora_tester_root_embedding_folder__"
     TEST_TYPE_LORA = "LoRA"
     TEST_TYPE_EMBEDDING = "Embedding"
+    MATRIX_LAYOUT_STANDARD = "Standard order"
+    MATRIX_LAYOUT_COMPARE_HORIZONTAL = "Compare: LoRAs as rows"
+    MATRIX_LAYOUT_COMPARE_VERTICAL = "Compare: LoRAs as columns"
+    MAX_COMPARISON_ITEMS = 10
+    DEFAULT_COMPARISON_STEP = Decimal("0.5")
     EMBEDDING_TARGET_POSITIVE = "Positive prompt"
     EMBEDDING_TARGET_NEGATIVE = "Negative prompt"
     KEEP_INDIVIDUAL_OUTPUT = "Matrix + individual images (Recommended)"
@@ -432,6 +437,12 @@ class LoRaTesterScript(scripts.Script):
                 continue
             normalized = list(row[:5])
             normalized.extend([""] * (5 - len(normalized)))
+            if not any(
+                str(value or "").strip().casefold()
+                not in {"", "nan", "none", "<na>"}
+                for value in normalized
+            ):
+                continue
             rows.append(normalized)
         return rows
 
@@ -609,6 +620,202 @@ class LoRaTesterScript(scripts.Script):
             else cls.MAX_TOTAL_CASES
         )
 
+    @staticmethod
+    def _resolve_matrix_outputs(per_item_grids, combined_overview):
+        """Keep the combined matrix mandatory until per-item grids are requested."""
+
+        per_item_grids = bool(per_item_grids)
+        return per_item_grids, (
+            bool(combined_overview) if per_item_grids else True
+        )
+
+    @classmethod
+    def _comparison_capacity_visible(
+        cls,
+        comparison_layout,
+        per_item_grids,
+        combined_overview,
+    ):
+        """Show comparison guidance only for an active comparison overview."""
+
+        _, combined_enabled = cls._resolve_matrix_outputs(
+            per_item_grids,
+            combined_overview,
+        )
+        return combined_enabled and comparison_layout in {
+            cls.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
+            cls.MATRIX_LAYOUT_COMPARE_VERTICAL,
+        }
+
+    @classmethod
+    def _estimated_label_header_height(cls, cell_width, cell_height):
+        """Conservatively mirror the compact legend's maximum four-line header."""
+
+        font_size = max(
+            cls.LABEL_MIN_FONT_SIZE,
+            (int(cell_width) + int(cell_height)) // cls.LABEL_FONT_DIVISOR,
+        )
+        line_spacing = max(2, font_size // 5)
+        vertical_padding = max(6, font_size // 3)
+        return (
+            cls.LABEL_MAX_LINES * font_size
+            + (cls.LABEL_MAX_LINES - 1) * line_spacing
+            + vertical_padding * 2
+        )
+
+    @classmethod
+    def _comparison_capacity(
+        cls,
+        cell_width,
+        cell_height,
+        item_count,
+        orientation,
+        margin=5,
+        draw_legend=True,
+        include_reference=True,
+        reference_width=None,
+        reference_height=None,
+    ):
+        """Return the maximum equally aligned weight slots on one safe page."""
+
+        try:
+            cell_width = max(1, int(cell_width))
+            cell_height = max(1, int(cell_height))
+            item_count = int(item_count)
+            margin = max(0, int(margin))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        if item_count < 1 or item_count > cls.MAX_COMPARISON_ITEMS:
+            return 0
+
+        label_height = (
+            cls._estimated_label_header_height(cell_width, cell_height)
+            if draw_legend
+            else 0
+        )
+        labeled_height = cell_height + label_height
+        horizontal_gap = margin if draw_legend else 0
+        if include_reference:
+            reference_width = max(1, int(reference_width or cell_width))
+            reference_height = max(1, int(reference_height or labeled_height))
+        else:
+            reference_width = 0
+            reference_height = 0
+
+        capacity = 0
+        for slot_count in range(1, cls.MAX_WEIGHTS_PER_ITEM + 1):
+            if orientation == cls.MATRIX_LAYOUT_COMPARE_HORIZONTAL:
+                content_width = (
+                    slot_count * cell_width
+                    + max(0, slot_count - 1) * horizontal_gap
+                )
+                content_height = (
+                    item_count * labeled_height
+                    + max(0, item_count - 1) * margin
+                )
+            elif orientation == cls.MATRIX_LAYOUT_COMPARE_VERTICAL:
+                content_width = (
+                    item_count * cell_width
+                    + max(0, item_count - 1) * horizontal_gap
+                )
+                content_height = (
+                    slot_count * labeled_height
+                    + max(0, slot_count - 1) * margin
+                )
+            else:
+                return 0
+
+            page_width = max(content_width, reference_width)
+            page_height = content_height
+            if include_reference:
+                page_height += reference_height + margin
+            if (
+                page_width > cls.MAX_MATRIX_DIMENSION
+                or page_height > cls.MAX_MATRIX_DIMENSION
+                or page_width * page_height > cls.MAX_MATRIX_PIXELS
+            ):
+                break
+            capacity = slot_count
+        return capacity
+
+    @classmethod
+    def _comparison_range_hint(cls, capacity):
+        """Describe the largest symmetric 0.5-step range fitting one page."""
+
+        capacity = max(0, int(capacity or 0))
+        symmetric_count = capacity if capacity % 2 else capacity - 1
+        if symmetric_count < 1:
+            return "none"
+        if symmetric_count == 1:
+            return "0"
+        endpoint = cls.DEFAULT_COMPARISON_STEP * ((symmetric_count - 1) // 2)
+        endpoint_text = cls._format_weight(endpoint)
+        return f"-{endpoint_text}:{endpoint_text}:{cls._format_weight(cls.DEFAULT_COMPARISON_STEP)}"
+
+    @classmethod
+    def _comparison_capacity_html(
+        cls,
+        test_type,
+        selected_loras,
+        selected_embeddings,
+        width,
+        height,
+        margin,
+        draw_legend,
+        include_reference,
+    ):
+        selected = (
+            selected_embeddings
+            if test_type == cls.TEST_TYPE_EMBEDDING
+            else selected_loras
+        ) or []
+        item_count = len(selected)
+        try:
+            width = max(1, int(float(width)))
+            height = max(1, int(float(height)))
+        except (TypeError, ValueError, OverflowError):
+            width, height = 0, 0
+
+        if not item_count:
+            detail = "Select at least one LoRA or Embedding to calculate capacity."
+        elif item_count > cls.MAX_COMPARISON_ITEMS:
+            detail = (
+                f"Comparison layouts support at most {cls.MAX_COMPARISON_ITEMS} "
+                f"items; {item_count} are currently selected."
+            )
+        elif not width or not height:
+            detail = "The current Forge width and height are not available yet."
+        else:
+            horizontal = cls._comparison_capacity(
+                width,
+                height,
+                item_count,
+                cls.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
+                margin=margin,
+                draw_legend=draw_legend,
+                include_reference=include_reference,
+            )
+            vertical = cls._comparison_capacity(
+                width,
+                height,
+                item_count,
+                cls.MATRIX_LAYOUT_COMPARE_VERTICAL,
+                margin=margin,
+                draw_legend=draw_legend,
+                include_reference=include_reference,
+            )
+            detail = (
+                f"<b>Rows:</b> safe max {horizontal} image(s) per item/page; "
+                f"symmetric 0.5 range: <code>{html.escape(cls._comparison_range_hint(horizontal))}</code>"
+                " &nbsp; | &nbsp; "
+                f"<b>Columns:</b> safe max {vertical} image(s) per item/page; "
+                f"symmetric 0.5 range: <code>{html.escape(cls._comparison_range_hint(vertical))}</code>"
+            )
+        return (
+            "<p class='lora-tester-comparison-capacity'>"
+            f"{detail}</p>"
+        )
+
     @classmethod
     def _resolve_item_weights(cls, settings_row, weight_offset, global_weights, item):
         """Resolve one optional Min/Max/Step override without silent fallback."""
@@ -720,6 +927,12 @@ class LoRaTesterScript(scripts.Script):
             else:
                 normalized = list(row[:6])
                 normalized.extend([""] * (6 - len(normalized)))
+            if not any(
+                str(value or "").strip().casefold()
+                not in {"", "nan", "none", "<na>"}
+                for value in normalized
+            ):
+                continue
             rows.append(normalized)
         return rows
 
@@ -1253,6 +1466,13 @@ class LoRaTesterScript(scripts.Script):
             'last_generation_memory': state.get('last_generation_memory'),
             'ram_stop_reason': state.get('ram_stop_reason'),
             'output_retention': state.get('output_retention'),
+            'create_per_item_grids': state.get('create_per_item_grids', False),
+            'create_combined_overview': state.get('create_combined_overview', True),
+            'comparison_layout': state.get(
+                'comparison_layout',
+                "Standard order",
+            ),
+            'matrix_outputs': state.get('matrix_outputs', []),
             'extreme_run_mode': state.get('extreme_run_mode', False),
             'case_limit': state.get('case_limit'),
             'individual_output_dir': state.get('individual_output_dir'),
@@ -1430,6 +1650,7 @@ class LoRaTesterScript(scripts.Script):
                         row_count=(0, "dynamic"),
                         col_count=(5, "fixed"),
                         interactive=True,
+                        visible=False,
                         wrap=True,
                         height=300,
                         column_widths=["30%", "34%", "14%", "11%", "11%"],
@@ -1536,6 +1757,7 @@ class LoRaTesterScript(scripts.Script):
                         row_count=(0, "dynamic"),
                         col_count=(6, "fixed"),
                         interactive=True,
+                        visible=False,
                         wrap=True,
                         height=300,
                         column_widths=["25%", "28%", "19%", "11%", "9%", "8%"],
@@ -1561,6 +1783,76 @@ class LoRaTesterScript(scripts.Script):
                         elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_draw_legend"
                     )
 
+                per_item_grids = gr.Checkbox(
+                    value=False,
+                    label="Create one grid per tested LoRA or Embedding",
+                    info=(
+                        "Disabled keeps the former output: one combined matrix plus "
+                        "the selected individual-image retention mode."
+                    ),
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_per_item_grids",
+                )
+
+                combined_overview = gr.Checkbox(
+                    value=True,
+                    interactive=False,
+                    label="Also create the combined overview",
+                    info=(
+                        "This choice becomes available when per-item grids are enabled. "
+                        "Without per-item grids the combined matrix is the required "
+                        "primary output."
+                    ),
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_combined_overview",
+                )
+
+                comparison_width_bridge = gr.Number(
+                    value=1024,
+                    precision=0,
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_width",
+                    elem_classes=["lora-tester-layout-bridge"],
+                )
+                comparison_height_bridge = gr.Number(
+                    value=1024,
+                    precision=0,
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_height",
+                    elem_classes=["lora-tester-layout-bridge"],
+                )
+                comparison_refresh_bridge = gr.Button(
+                    "Refresh comparison capacity",
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_refresh",
+                    elem_classes=["lora-tester-layout-bridge"],
+                )
+                comparison_capacity = gr.HTML(
+                    value=self._comparison_capacity_html(
+                        self.TEST_TYPE_LORA,
+                        [],
+                        [],
+                        1024,
+                        1024,
+                        5,
+                        True,
+                        True,
+                    ),
+                    visible=False,
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_capacity",
+                )
+                comparison_layout = gr.Radio(
+                    choices=[
+                        self.MATRIX_LAYOUT_STANDARD,
+                        self.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
+                        self.MATRIX_LAYOUT_COMPARE_VERTICAL,
+                    ],
+                    value=self.MATRIX_LAYOUT_STANDARD,
+                    label="Combined matrix layout",
+                    info=(
+                        "Rows keeps every item's weights together horizontally. "
+                        "Columns keeps every item's weights together vertically. "
+                        "Comparison layouts require identical weights for every item "
+                        "and support at most 10 items."
+                    ),
+                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_layout",
+                )
+
                 extreme_run_mode = gr.Checkbox(
                     value=False,
                     label="Extreme Run Mode (up to 10,000 matrix cells)",
@@ -1578,7 +1870,12 @@ class LoRaTesterScript(scripts.Script):
                         maximum=10,
                         step=1,
                         value=3,
-                        label="Matrix Columns",
+                        label="Standard combined matrix columns",
+                        info=(
+                            "Used only by the Standard order combined overview. "
+                            "Per-item grids always keep one item's weights in a "
+                            "horizontal row and split only at a safety limit."
+                        ),
                         elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_cols"
                     )
 
@@ -1677,6 +1974,15 @@ class LoRaTesterScript(scripts.Script):
             )
 
         # Event handlers
+        def settings_table_update(rows):
+            """Show selection-owned rows and hide the empty table state."""
+
+            rows = list(rows or [])
+            return gr.update(
+                value=rows,
+                visible=bool(rows),
+            )
+
         def update_lora_list(folder_filter, include_children, selected_loras, current_settings):
             """Refresh folders/LoRAs and preserve selections that remain in scope."""
             self.cached_loras = LoRaMetadataReader.find_all_loras()
@@ -1694,7 +2000,7 @@ class LoRaTesterScript(scripts.Script):
             return (
                 gr.update(choices=folder_choices, value=folder_filter),
                 gr.update(choices=choices, value=selected_loras),
-                rows,
+                settings_table_update(rows),
             )
 
         def load_loras_on_activation(
@@ -1702,7 +2008,7 @@ class LoRaTesterScript(scripts.Script):
         ):
             """Populate the list the first time the accordion is enabled."""
             if not enabled:
-                return gr.update(), gr.update(), current_settings
+                return gr.update(), gr.update(), gr.update()
             if not self.cached_loras:
                 return update_lora_list(
                     folder_filter, include_children, selected_loras, current_settings
@@ -1722,7 +2028,7 @@ class LoRaTesterScript(scripts.Script):
             return (
                 gr.update(choices=folder_choices, value=folder_filter),
                 gr.update(choices=choices, value=selected_loras),
-                rows,
+                settings_table_update(rows),
             )
 
         def apply_folder_filter(
@@ -1738,10 +2044,14 @@ class LoRaTesterScript(scripts.Script):
             else:
                 selected_loras = list(choices)
             rows = self._build_lora_settings_rows(selected_loras, current_settings)
-            return gr.update(choices=choices, value=selected_loras), rows
+            return (
+                gr.update(choices=choices, value=selected_loras),
+                settings_table_update(rows),
+            )
 
         def update_lora_settings(selected_loras, current_settings):
-            return self._build_lora_settings_rows(selected_loras, current_settings)
+            rows = self._build_lora_settings_rows(selected_loras, current_settings)
+            return settings_table_update(rows)
 
         def format_embedding_status(message, is_error=False):
             color = "#d99a35" if is_error else "#888"
@@ -1787,7 +2097,7 @@ class LoRaTesterScript(scripts.Script):
             return (
                 gr.update(choices=folder_choices, value=folder_filter),
                 gr.update(choices=choices, value=selected_embeddings),
-                rows,
+                settings_table_update(rows),
                 format_embedding_status(status, is_error=is_error),
             )
 
@@ -1800,7 +2110,7 @@ class LoRaTesterScript(scripts.Script):
             preset,
         ):
             if not enabled:
-                return gr.update(), gr.update(), current_settings, gr.update()
+                return gr.update(), gr.update(), gr.update(), gr.update()
             return update_embedding_list(
                 folder_filter,
                 include_children,
@@ -1819,7 +2129,7 @@ class LoRaTesterScript(scripts.Script):
             current_settings,
         ):
             if selected_type != self.TEST_TYPE_EMBEDDING:
-                return gr.update(), gr.update(), current_settings, gr.update()
+                return gr.update(), gr.update(), gr.update(), gr.update()
             return update_embedding_list(
                 folder_filter,
                 include_children,
@@ -1847,18 +2157,75 @@ class LoRaTesterScript(scripts.Script):
             rows = self._build_embedding_settings_rows(
                 selected_embeddings, current_settings
             )
-            return gr.update(choices=choices, value=selected_embeddings), rows
+            return (
+                gr.update(choices=choices, value=selected_embeddings),
+                settings_table_update(rows),
+            )
 
         def update_embedding_settings(selected_embeddings, current_settings):
-            return self._build_embedding_settings_rows(
+            rows = self._build_embedding_settings_rows(
                 selected_embeddings, current_settings
             )
+            return settings_table_update(rows)
 
         def toggle_test_type(selected_type):
             embedding_mode = selected_type == self.TEST_TYPE_EMBEDDING
             return (
                 gr.update(visible=not embedding_mode),
                 gr.update(visible=embedding_mode),
+            )
+
+        def update_output_controls(create_per_item, create_combined):
+            create_per_item, combined_enabled = self._resolve_matrix_outputs(
+                create_per_item,
+                create_combined,
+            )
+            return (
+                gr.update(value=combined_enabled, interactive=create_per_item),
+                gr.update(interactive=combined_enabled),
+            )
+
+        def update_comparison_interactivity(create_per_item, create_combined):
+            _, combined_enabled = self._resolve_matrix_outputs(
+                create_per_item,
+                create_combined,
+            )
+            return gr.update(
+                interactive=combined_enabled
+            )
+
+        def update_comparison_capacity(
+            selected_type,
+            selected_loras,
+            selected_embeddings,
+            width,
+            height,
+            margin,
+            legend,
+            reference,
+        ):
+            return self._comparison_capacity_html(
+                selected_type,
+                selected_loras,
+                selected_embeddings,
+                width,
+                height,
+                margin,
+                legend,
+                reference,
+            )
+
+        def update_comparison_capacity_visibility(
+            selected_layout,
+            create_per_item,
+            create_combined,
+        ):
+            return gr.update(
+                visible=self._comparison_capacity_visible(
+                    selected_layout,
+                    create_per_item,
+                    create_combined,
+                )
             )
 
         # Wire up event handlers
@@ -2004,6 +2371,70 @@ class LoRaTesterScript(scripts.Script):
             outputs=[embedding_settings],
         )
 
+        per_item_grids.change(
+            fn=update_output_controls,
+            inputs=[per_item_grids, combined_overview],
+            outputs=[combined_overview, comparison_layout],
+            queue=False,
+        )
+        combined_overview.change(
+            fn=update_comparison_interactivity,
+            inputs=[per_item_grids, combined_overview],
+            outputs=[comparison_layout],
+            queue=False,
+        )
+
+        capacity_visibility_inputs = [
+            comparison_layout,
+            per_item_grids,
+            combined_overview,
+        ]
+        for component in (
+            comparison_layout,
+            per_item_grids,
+            combined_overview,
+        ):
+            component.change(
+                fn=update_comparison_capacity_visibility,
+                inputs=capacity_visibility_inputs,
+                outputs=[comparison_capacity],
+                queue=False,
+                show_progress=False,
+            )
+
+        capacity_inputs = [
+            test_type,
+            lora_selection,
+            embedding_selection,
+            comparison_width_bridge,
+            comparison_height_bridge,
+            matrix_margin,
+            draw_legend,
+            save_original,
+        ]
+        for component in (
+            test_type,
+            lora_selection,
+            embedding_selection,
+            matrix_margin,
+            draw_legend,
+            save_original,
+        ):
+            component.change(
+                fn=update_comparison_capacity,
+                inputs=capacity_inputs,
+                outputs=[comparison_capacity],
+                queue=False,
+                show_progress=False,
+            )
+        comparison_refresh_bridge.click(
+            fn=update_comparison_capacity,
+            inputs=capacity_inputs,
+            outputs=[comparison_capacity],
+            queue=False,
+            show_progress=False,
+        )
+
         # Return all components that will be passed to processing callbacks.
         return [
             lora_tester_enabled,
@@ -2018,6 +2449,9 @@ class LoRaTesterScript(scripts.Script):
             embedding_position,
             embedding_settings,
             save_original,
+            per_item_grids,
+            combined_overview,
+            comparison_layout,
             extreme_run_mode,
             draw_legend,
             matrix_cols,
@@ -2036,7 +2470,8 @@ class LoRaTesterScript(scripts.Script):
                        use_trigger_words, trigger_position, lora_settings,
                        embedding_selection, global_embedding_weight_spec,
                        embedding_position, embedding_settings,
-                       save_original, extreme_run_mode, draw_legend,
+                       save_original, per_item_grids, combined_overview,
+                       comparison_layout, extreme_run_mode, draw_legend,
                        matrix_cols, matrix_margin,
                        output_retention,
                        unload_models_before_matrix,
@@ -2128,6 +2563,8 @@ class LoRaTesterScript(scripts.Script):
             cases.append({
                 'kind': "baseline",
                 'label': f"Baseline (No {item_label})",
+                'item_key': None,
+                'item_label': None,
                 'lora_tag_name': None,
                 'embedding_name': None,
                 'trigger_words': [],
@@ -2218,6 +2655,8 @@ class LoRaTesterScript(scripts.Script):
                 cases.append({
                     'kind': "embedding" if embedding_mode else "lora",
                     'label': f"{display_name} (weight {formatted_weight})",
+                    'item_key': item_path,
+                    'item_label': display_name,
                     'lora_tag_name': lora_tag_name,
                     'embedding_name': embedding_name,
                     'embedding_target': embedding_target,
@@ -2233,6 +2672,23 @@ class LoRaTesterScript(scripts.Script):
                 f"Refresh the {item_label} list and try again.",
             )
             return
+
+        if comparison_layout not in (
+            self.MATRIX_LAYOUT_STANDARD,
+            self.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
+            self.MATRIX_LAYOUT_COMPARE_VERTICAL,
+        ):
+            comparison_layout = self.MATRIX_LAYOUT_STANDARD
+        per_item_grids, combined_requested = self._resolve_matrix_outputs(
+            per_item_grids,
+            combined_overview,
+        )
+        if combined_requested and comparison_layout != self.MATRIX_LAYOUT_STANDARD:
+            groups = self._group_comparison_cells(comparison_cases)
+            comparison_error = self._comparison_group_error(groups)
+            if comparison_error:
+                self._block_generation(p, comparison_error)
+                return
 
         output_mode = self._processing_output_mode(p)
         try:
@@ -2276,6 +2732,9 @@ class LoRaTesterScript(scripts.Script):
             'use_trigger_words': use_trigger_words,
             'trigger_position': trigger_position,
             'draw_legend': draw_legend,
+            'create_per_item_grids': per_item_grids,
+            'create_combined_overview': combined_requested,
+            'comparison_layout': comparison_layout,
             'matrix_cols': int(matrix_cols),
             'matrix_margin': int(matrix_margin),
             'output_retention': output_retention,
@@ -2295,6 +2754,7 @@ class LoRaTesterScript(scripts.Script):
             'manifest_path': str(session_dir / "manifest.json"),
             'cells': {},
             'rows': [],
+            'matrix_outputs': [],
             'reference_row': None,
             'ram_monitor': ram_monitor,
             'ram_finalizer': ram_finalizer,
@@ -2668,6 +3128,8 @@ class LoRaTesterScript(scripts.Script):
                 'index': case_index,
                 'path': str(cell_path),
                 'label': case['label'],
+                'item_key': case.get('item_key'),
+                'item_label': case.get('item_label'),
                 'trigger_words': list(case.get('trigger_words', [])),
                 'weight': case.get('weight'),
                 'is_baseline': self._case_is_baseline(case),
@@ -2729,7 +3191,8 @@ class LoRaTesterScript(scripts.Script):
                    use_trigger_words, trigger_position, lora_settings,
                    embedding_selection, global_embedding_weight_spec,
                    embedding_position, embedding_settings,
-                   save_original, extreme_run_mode, draw_legend,
+                   save_original, per_item_grids, combined_overview,
+                   comparison_layout, extreme_run_mode, draw_legend,
                    matrix_cols, matrix_margin,
                    output_retention,
                    unload_models_before_matrix,
@@ -2801,18 +3264,14 @@ class LoRaTesterScript(scripts.Script):
                 state['reference_row'] = reference_row
 
             print(
-                f"[LoRA Tester] Creating row strips: {len(comparison_cells)} comparison "
-                f"cell(s), {state['matrix_cols']} configured columns; reference image: "
+                f"[LoRA Tester] Preparing requested matrices for "
+                f"{len(self._group_comparison_cells(comparison_cells))} tested item(s), "
+                f"{state['matrix_cols']} standard-overview columns; reference image: "
                 f"{'repeated on every page' if reference_row else 'disabled'}"
             )
-            if comparison_cells:
-                rows = self._build_row_strips(state, comparison_cells)
-            else:
-                rows = []
-                state['rows'] = []
-            page_paths = self._build_matrix_pages(
+            page_paths = self._build_requested_matrices(
                 state,
-                rows,
+                comparison_cells,
                 p,
                 processed,
                 grid_info,
@@ -2905,6 +3364,8 @@ class LoRaTesterScript(scripts.Script):
                 'index': case_index,
                 'path': str(cell_path),
                 'label': case['label'],
+                'item_key': case.get('item_key'),
+                'item_label': case.get('item_label'),
                 'trigger_words': list(case.get('trigger_words', [])),
                 'weight': case.get('weight'),
                 'is_baseline': self._case_is_baseline(case),
@@ -2924,6 +3385,354 @@ class LoRaTesterScript(scripts.Script):
         if len(triggers) > 3:
             trigger_text += "..."
         return f"{label}\n{trigger_text}"
+
+    @staticmethod
+    def _group_comparison_cells(cells):
+        """Keep tested items in generation order while collecting their weights."""
+
+        groups = []
+        groups_by_key = {}
+        for cell in cells or []:
+            if (
+                cell.get('is_baseline')
+                or cell.get('kind') == "baseline"
+                or ('item_key' in cell and cell.get('item_key') is None)
+            ):
+                continue
+            item_key = cell.get('item_key')
+            if item_key is None:
+                item_key = f"legacy-cell-{cell.get('index', len(groups))}"
+            item_key = str(item_key)
+            group = groups_by_key.get(item_key)
+            if group is None:
+                group = {
+                    'item_key': item_key,
+                    'item_label': str(cell.get('item_label') or cell.get('label') or item_key),
+                    'cells': [],
+                }
+                groups_by_key[item_key] = group
+                groups.append(group)
+            group['cells'].append(cell)
+        return groups
+
+    @classmethod
+    def _comparison_group_error(cls, groups):
+        if len(groups) > cls.MAX_COMPARISON_ITEMS:
+            return (
+                f"Comparison matrix layouts support at most "
+                f"{cls.MAX_COMPARISON_ITEMS} LoRAs or Embeddings; "
+                f"{len(groups)} were prepared. Use Standard order or reduce the selection."
+            )
+        if not groups:
+            return "No comparison items are available for the selected matrix layout."
+
+        expected_weights = tuple(
+            str(cell.get('weight')) for cell in groups[0]['cells']
+        )
+        for group in groups[1:]:
+            weights = tuple(str(cell.get('weight')) for cell in group['cells'])
+            if weights != expected_weights:
+                return (
+                    "Comparison matrix layouts require the same weight values in the "
+                    "same order for every tested item. Remove per-item range differences "
+                    "or use Standard order."
+                )
+        return None
+
+    @classmethod
+    def _matrix_output_slug(cls, test_type, item_label, ordinal):
+        kind = cls._safe_filename_part(str(test_type or "item").casefold(), limit=16)
+        label = cls._safe_filename_part(item_label, limit=48)
+        label = '-'.join(label.split())
+        return f"{kind}-{int(ordinal):03d}-{label}"
+
+    def _build_comparison_matrix_pages(
+        self,
+        state,
+        groups,
+        p,
+        processed,
+        grid_info,
+        reference_row=None,
+    ):
+        """Build aligned comparison pages without splitting an item/weight axis."""
+
+        error = self._comparison_group_error(groups)
+        if error:
+            raise RuntimeError(error)
+        orientation = state.get('comparison_layout', self.MATRIX_LAYOUT_STANDARD)
+        all_cells = [cell for group in groups for cell in group['cells']]
+        cell_width = max(int(cell['width']) for cell in all_cells)
+        cell_height = max(int(cell['height']) for cell in all_cells)
+        capacity = self._comparison_capacity(
+            cell_width,
+            cell_height,
+            len(groups),
+            orientation,
+            margin=state.get('matrix_margin', 0),
+            draw_legend=state.get('draw_legend', True),
+            include_reference=reference_row is not None,
+            reference_width=(reference_row or {}).get('width'),
+            reference_height=(reference_row or {}).get('height'),
+        )
+        if capacity < 1:
+            raise RuntimeError(
+                "the selected comparison orientation cannot fit one aligned weight "
+                "slot inside the safe Gallery page limits at the generated resolution"
+            )
+
+        total_weights = len(groups[0]['cells'])
+        page_paths = []
+        for part_number, start in enumerate(range(0, total_weights, capacity), start=1):
+            end = min(total_weights, start + capacity)
+            rows = []
+            if orientation == self.MATRIX_LAYOUT_COMPARE_HORIZONTAL:
+                for item_number, group in enumerate(groups, start=1):
+                    rows.extend(
+                        self._build_row_strips(
+                            state,
+                            group['cells'][start:end],
+                            columns=end - start,
+                            filename_prefix=(
+                                f"comparison-rows-part-{part_number:03d}-"
+                                f"item-{item_number:02d}"
+                            ),
+                        )
+                    )
+                orientation_text = "LoRAs as rows"
+            else:
+                for weight_index in range(start, end):
+                    rows.extend(
+                        self._build_row_strips(
+                            state,
+                            [group['cells'][weight_index] for group in groups],
+                            columns=len(groups),
+                            filename_prefix=(
+                                f"comparison-columns-part-{part_number:03d}-"
+                                f"weight-{weight_index:03d}"
+                            ),
+                        )
+                    )
+                orientation_text = "LoRAs as columns"
+
+            _, _, estimated_peak = self._estimate_page_peak(
+                state,
+                rows,
+                reference_row,
+            )
+            if estimated_peak == float('inf'):
+                raise RuntimeError(
+                    "an aligned comparison part exceeded the safe Gallery page limits "
+                    "after its real labels were measured; reduce the range or source "
+                    "resolution"
+                )
+            slug = f"combined-comparison-part-{part_number:03d}"
+            pages = self._build_matrix_pages(
+                state,
+                rows,
+                p,
+                processed,
+                grid_info,
+                reference_row=reference_row,
+                output_slug=slug,
+                output_description=(
+                    f"combined comparison ({orientation_text}, weights "
+                    f"{start + 1}-{end} of {total_weights})"
+                ),
+            )
+            if len(pages) != 1:
+                raise RuntimeError(
+                    "an aligned comparison part could not be kept on one safe page; "
+                    "recovery files were retained instead of returning a misleading "
+                    "partial comparison"
+                )
+            page_paths.extend(pages)
+        return page_paths
+
+    def _build_per_item_matrix_pages(
+        self,
+        state,
+        group,
+        p,
+        processed,
+        grid_info,
+        reference_row=None,
+        output_slug="item",
+    ):
+        """Build one horizontal weight row per item and split only when required."""
+
+        cells = list(group.get('cells') or [])
+        if not cells:
+            return []
+        cell_width = max(int(cell['width']) for cell in cells)
+        cell_height = max(int(cell['height']) for cell in cells)
+        capacity = self._comparison_capacity(
+            cell_width,
+            cell_height,
+            1,
+            self.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
+            margin=state.get('matrix_margin', 0),
+            draw_legend=state.get('draw_legend', True),
+            include_reference=reference_row is not None,
+            reference_width=(reference_row or {}).get('width'),
+            reference_height=(reference_row or {}).get('height'),
+        )
+        if capacity < 1:
+            raise RuntimeError(
+                "the per-item grid cannot fit one image inside the safe Gallery "
+                "page limits at the generated resolution"
+            )
+
+        total_parts = (len(cells) + capacity - 1) // capacity
+        page_paths = []
+        for part_number, start in enumerate(range(0, len(cells), capacity), start=1):
+            part = cells[start:start + capacity]
+            part_slug = (
+                output_slug
+                if total_parts == 1
+                else f"{output_slug}-part-{part_number:03d}"
+            )
+            rows = self._build_row_strips(
+                state,
+                part,
+                columns=len(part),
+                filename_prefix=f"{part_slug}-row",
+            )
+            if len(rows) != 1:
+                raise RuntimeError(
+                    "a per-item grid part could not be kept in one horizontal row"
+                )
+            _, _, estimated_peak = self._estimate_page_peak(
+                state,
+                rows,
+                reference_row,
+            )
+            if estimated_peak == float('inf'):
+                raise RuntimeError(
+                    "a horizontal per-item grid exceeded the safe Gallery page limits "
+                    "after its real labels were measured; reduce the range or source "
+                    "resolution"
+                )
+            pages = self._build_matrix_pages(
+                state,
+                rows,
+                p,
+                processed,
+                grid_info,
+                reference_row=reference_row,
+                output_slug=part_slug,
+                output_description=(
+                    f"individual grid for {group['item_label']} "
+                    f"(horizontal part {part_number} of {total_parts})"
+                ),
+            )
+            if len(pages) != 1:
+                raise RuntimeError(
+                    "a horizontal per-item grid part could not be kept on one safe page; "
+                    "recovery files were retained"
+                )
+            page_paths.extend(pages)
+        return page_paths
+
+    def _build_requested_matrices(
+        self,
+        state,
+        comparison_cells,
+        p,
+        processed,
+        grid_info,
+        reference_row=None,
+    ):
+        """Build per-item grids first and append the optional combined overview."""
+
+        page_paths = []
+        state['matrix_outputs'] = []
+        groups = self._group_comparison_cells(comparison_cells)
+
+        def record_pages(kind, slug, paths, item_key=None, item_label=None):
+            for page_number, path in enumerate(paths, start=1):
+                state['matrix_outputs'].append(
+                    {
+                        'kind': kind,
+                        'slug': slug,
+                        'item_key': item_key,
+                        'item_label': item_label,
+                        'page': page_number,
+                        'path': str(path),
+                    }
+                )
+            page_paths.extend(paths)
+            self._write_manifest(state, "matrix-pages")
+
+        if state.get('create_per_item_grids', False):
+            for ordinal, group in enumerate(groups, start=1):
+                slug = self._matrix_output_slug(
+                    state.get('test_type'),
+                    group['item_label'],
+                    ordinal,
+                )
+                item_pages = self._build_per_item_matrix_pages(
+                    state,
+                    group,
+                    p,
+                    processed,
+                    grid_info,
+                    reference_row=reference_row,
+                    output_slug=slug,
+                )
+                record_pages(
+                    "item",
+                    slug,
+                    item_pages,
+                    item_key=group['item_key'],
+                    item_label=group['item_label'],
+                )
+
+        if state.get('create_combined_overview', True):
+            layout = state.get('comparison_layout', self.MATRIX_LAYOUT_STANDARD)
+            if layout == self.MATRIX_LAYOUT_STANDARD:
+                combined_rows = self._build_row_strips(
+                    state,
+                    comparison_cells,
+                    filename_prefix="combined-row",
+                )
+                combined_pages = self._build_matrix_pages(
+                    state,
+                    combined_rows,
+                    p,
+                    processed,
+                    grid_info,
+                    reference_row=reference_row,
+                    output_slug="combined-overview",
+                    output_description="combined overview",
+                )
+            else:
+                combined_pages = self._build_comparison_matrix_pages(
+                    state,
+                    groups,
+                    p,
+                    processed,
+                    grid_info,
+                    reference_row=reference_row,
+                )
+            record_pages("combined", "combined-overview", combined_pages)
+        elif groups:
+            print("[LoRA Tester] Combined overview disabled; returning individual grids only")
+
+        if not page_paths and reference_row is not None:
+            reference_pages = self._build_matrix_pages(
+                state,
+                [],
+                p,
+                processed,
+                grid_info,
+                reference_row=reference_row,
+                output_slug="reference-recovery",
+                output_description="reference recovery",
+            )
+            record_pages("reference", "reference-recovery", reference_pages)
+
+        return page_paths
 
     @staticmethod
     def _text_width(drawing, text, font):
@@ -3124,6 +3933,8 @@ class LoRaTesterScript(scripts.Script):
                     'peak_bytes': 0,
                 }
                 rows.append(row_record)
+                if track_as_matrix_rows:
+                    state.setdefault('rows', []).append(row_record)
             finally:
                 row_peak = monitor.end_interval() if monitor is not None else 0
                 state['maximum_row_peak_bytes'] = max(
@@ -3138,7 +3949,6 @@ class LoRaTesterScript(scripts.Script):
                     row_grid.close()
 
             if track_as_matrix_rows:
-                state['rows'] = rows
                 self._write_manifest(state, "row-strips")
 
         # Keep every source cell until all matrix pages have been written and
@@ -3179,7 +3989,15 @@ class LoRaTesterScript(scripts.Script):
         return width, height, estimated_peak
 
     def _build_matrix_pages(
-        self, state, rows, p, processed, grid_info, reference_row=None
+        self,
+        state,
+        rows,
+        p,
+        processed,
+        grid_info,
+        reference_row=None,
+        output_slug="combined-overview",
+        output_description="combined overview",
     ):
         page_paths = []
         row_offset = 0
@@ -3189,7 +4007,7 @@ class LoRaTesterScript(scripts.Script):
                 state, [], reference_row
             )
             print(
-                f"[LoRA Tester] Matrix page 1: reference image only, "
+                f"[LoRA Tester] {output_description}, page 1: reference image only, "
                 f"estimated peak {estimated_peak / MIB:.0f} MB"
             )
             page_path = self._compose_matrix_page(
@@ -3202,6 +4020,7 @@ class LoRaTesterScript(scripts.Script):
                 processed,
                 grid_info,
                 reference_row=reference_row,
+                output_slug=output_slug,
             )
             return [Path(page_path)]
 
@@ -3246,14 +4065,16 @@ class LoRaTesterScript(scripts.Script):
                     output_dir.mkdir(parents=True, exist_ok=True)
                     session_name = Path(state['session_dir']).name
                     output_path = output_dir / (
-                        f"lora_tester_grid-{session_name}-page-{page_number:03d}.png"
+                        f"lora_tester_grid-{session_name}-{output_slug}-"
+                        f"page-{page_number:03d}.png"
                     )
                     shutil.copy2(fallback_path, output_path)
                     fallback_path = output_path
                 page_paths.append(fallback_path)
                 row_offset += 1
                 print(
-                    f"[LoRA Tester] Matrix page {page_number}: one-row disk fallback "
+                    f"[LoRA Tester] {output_description}, page {page_number}: "
+                    "one-row disk fallback "
                     "because the repeated reference or calculated RAM reserve would "
                     "cross a page limit"
                 )
@@ -3263,7 +4084,8 @@ class LoRaTesterScript(scripts.Script):
                 state, selected_rows, reference_row
             )
             print(
-                f"[LoRA Tester] Matrix page {page_number}: {len(selected_rows)} row(s), "
+                f"[LoRA Tester] {output_description}, page {page_number}: "
+                f"{len(selected_rows)} row(s), "
                 f"{width}x{height} ({width * height:,} pixels), "
                 f"estimated peak {estimated_peak / MIB:.0f} MB"
                 f"{' including repeated reference' if reference_row else ''}"
@@ -3278,6 +4100,7 @@ class LoRaTesterScript(scripts.Script):
                 processed,
                 grid_info,
                 reference_row=reference_row,
+                output_slug=output_slug,
             )
             page_paths.append(Path(page_path))
             row_offset += len(selected_rows)
@@ -3296,6 +4119,7 @@ class LoRaTesterScript(scripts.Script):
         processed,
         grid_info,
         reference_row=None,
+        output_slug="combined-overview",
     ):
         background = ImageColor.getcolor(shared.opts.grid_background_color, "RGB")
         page = Image.new("RGB", (width, height), background)
@@ -3327,14 +4151,15 @@ class LoRaTesterScript(scripts.Script):
                     session_name = Path(state['session_dir']).name
                     save_overrides = {
                         'forced_filename': (
-                            f"lora_tester_grid-{session_name}-page-{page_number:03d}"
+                            f"lora_tester_grid-{session_name}-{output_slug}-"
+                            f"page-{page_number:03d}"
                         ),
                         'save_to_dirs': False,
                     }
                 page_path, _ = images.save_image(
                     page,
                     p.outpath_grids,
-                    "lora_tester_grid",
+                    f"lora_tester_{output_slug}",
                     seed=seed,
                     prompt=prompt,
                     extension=shared.opts.grid_format,
@@ -3346,7 +4171,9 @@ class LoRaTesterScript(scripts.Script):
                 )
                 return page_path
 
-            page_path = Path(state['session_dir']) / f"matrix-page-{page_number:03d}.png"
+            page_path = Path(state['session_dir']) / (
+                f"matrix-{output_slug}-page-{page_number:03d}.png"
+            )
             parameters = grid_info if getattr(shared.opts, 'enable_pnginfo', False) else None
             self._save_png_atomic(page, page_path, parameters=parameters)
             return str(page_path)
