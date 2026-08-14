@@ -43,6 +43,71 @@ then this document, `README.md`, and the current Git diff before changing code.
   retention modes, forced multi-page splitting, and broader SDXL/Pony/Illustrious
   coverage. The release notes preserve this confidence boundary.
 
+## Tagesabschluss — 2026-08-14
+
+### Exact handoff state
+
+- Public prerelease `v0.3.0-beta` is published and not a draft. Its annotated tag
+  resolves to `main` commit `d67569efd04588bf4821d22bf65edddc36c9cc56`.
+- Before this documentation-only Tagesabschluss, local `develop`, `origin/develop`,
+  and GitHub `develop` all resolve to
+  `68eed1413ac1d497db2195bc847abf2e1dd5fb7c`.
+- The development checkout is on `develop`. This Tagesabschluss changes only
+  `PROJECT_STATUS.md`; it does not alter production code, `main`, the release tag, or
+  the published GitHub release.
+- The LoRA Tester does not import, reference, or read files from
+  `sd-forge-embedding-bridge`. That repository remains an independent project. No
+  Forge Neo core file was changed or published.
+
+### Proven today
+
+- The current LoRA Tester feature set, version text, public documentation, `main`,
+  annotated tag, and GitHub prerelease were published successfully.
+- The 43-test development suite passed. Python production syntax, JavaScript syntax,
+  Ruff fatal-error checks, and Git diff checks passed.
+- All seven public product/documentation blobs match between `main` and `develop`;
+  the production `scripts/lora_tester.py` blob is identical on both branches.
+- GitHub independently confirms a public repository, default branch `main`, published
+  prerelease `v0.3.0-beta`, and tag target `d67569e`.
+- No GitHub Actions run exists for this release. This is recorded as missing automated
+  remote coverage, not as a failed check.
+
+### Confidence boundary and first task next session
+
+1. Restart/update Forge and run a short post-release txt2img smoke with a fixed seed,
+   reference enabled, three LoRAs, and a small shared weight range. Confirm legacy
+   combined output, per-item grids, optional combined output, both aligned layouts,
+   Gallery order, filenames, and visible labels.
+2. Force at least two safe pages and repeat with Matrix-only cleanup plus retained
+   individual images. Confirm the repeated reference and recovery behavior.
+3. Run one focused Embedding test with JSON trigger versus filename fallback and mixed
+   positive (`0`) / negative (`1`) routing; then repeat with Hi-Res and img2img when
+   practical.
+4. Record these as live Forge results. Automated/unit/browser checks must not be used
+   as substitutes for the missing generation evidence.
+5. After the release smoke is satisfactory, continue the one-LoRA/up-to-ten-checkpoint
+   scaffold already specified below. Preserve Forge-owned model loading, runtime LoRA
+   key mapping as final compatibility authority, disk-first persistence, and
+   unconditional restoration of the original model selection.
+
+### Resume commands
+
+Run from the Forge root:
+
+```powershell
+& '.\venv\Scripts\python.exe' -m unittest discover `
+  -s '.\extensions\Forge-Neo-Lora-Tester\tests' -v
+```
+
+Run from the extension repository:
+
+```powershell
+git status --short --branch
+git branch -vv
+git log -5 --oneline --decorate
+git diff --check
+```
+
 ## Proven working functionality
 
 - txt2img and img2img integration through Forge's always-on script lifecycle.
