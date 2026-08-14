@@ -1,0 +1,21 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright (C) 2026 vibecodingtoolmaker */
+
+/* Gradio does not render child inputs for visible=False components. Keep the
+   preset bridge mounted for JavaScript/Gradio synchronization, but never show it. */
+.lora-tester-preset-bridge {
+    display: none !important;
+}
+
+.lora-tester-layout-bridge {
+    display: none !important;
+}
+
+.lora-tester-empty-dataframe-row {
+    display: none !important;
+}
+
+.lora-tester-comparison-capacity {
+    margin: 0.25rem 0 0.5rem;
+    color: var(--body-text-color-subdued);
+}
