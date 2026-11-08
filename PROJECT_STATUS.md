@@ -26,8 +26,9 @@ then this document, `README.md`, and the current Git diff before changing code.
 ## Development progress — 2026-11-08
 
 The first one-LoRA/prompt-only multiple-checkpoint implementation and RAM-watchdog
-removal were frozen in local `develop` commit `3557f45`. The workflow-tab UI cleanup
-described below follows as the next change on `develop`.
+removal were frozen in `develop` commit `3557f45`; the workflow-tab UI followed in
+`3120031`, and public main-snapshot wording in `6c5f83f`. The five public product and
+documentation files were promoted to `main` in `a255d7f` and pushed to `origin/main`.
 
 Implemented:
 
@@ -74,6 +75,9 @@ Verified in this development pass:
   components successfully, and `git diff --check` passes. A 1600x1400 local
   Headless-Chrome preview confirmed the four-tab header, Selection layout, and
   warning summary styling. Full interaction still requires a restarted-Forge smoke.
+- `main:scripts/lora_tester.py` and `develop:scripts/lora_tester.py` have the identical
+  blob `65cc82e0e5bf5eb6f45659ddb4631ed98562d1ad`. The temporary promotion worktree was
+  removed after the clean `origin/main` push. No new tag or GitHub release was created.
 
 Not yet proven:
 
