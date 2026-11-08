@@ -53,6 +53,10 @@ affiliated with or endorsed by OpenAI.
   becomes an optional additional output
 - Offers aligned comparison layouts with every LoRA in one row or one column
 - Offers an explicit Extreme Run Mode for up to 10,000 matrix cells
+- Organizes setup into four workflow tabs: Selection, Models & Run Size, Grid, and
+  Output & Safety
+- Shows an always-visible planned-run summary with comparison cells, reference,
+  model count, total generations, and the active Standard/Extreme limits
 - Writes completed cells to disk instead of retaining decoded images in RAM
 - Builds labeled row strips on disk before composing the final matrix
 - Can unload the checkpoint, text encoder, and VAE before matrix construction
@@ -86,47 +90,41 @@ The **LoRA / Embedding Tester** accordion is available in both txt2img and img2i
 
 ## Usage
 
-1. Open and enable **LoRA / Embedding Tester**. Keep **Test Type** set to **LoRA**.
-   The LoRA inventory loads on first activation.
-2. Choose a folder or keep **Manual selection (all folders)**. Selecting a specific
-   folder selects all LoRAs in that scope. Manual mode tests only explicitly
-   selected LoRAs.
-3. Use **Include subfolders** to control whether descendants of the chosen folder
-   are included. Click **Refresh LoRA List** after adding or removing model files.
-4. Enter one global weight or range.
-5. Edit trigger words or weight overrides in the per-LoRA table if needed.
-6. Configure the reference image, trigger position, label display, matrix columns,
-   and margin. The reference is enabled by default and repeated on every page.
-7. Choose an output-retention mode. Keeping individual images is the safe default.
-8. Keep model unloading enabled so matrix creation can use the released RAM.
-9. Enable **Extreme Run Mode** only for deliberately large jobs above 500 cells or
-   multiple-model runs with more than 25 checkpoints.
-10. Leave **Create one grid per tested LoRA or Embedding** disabled for the former
-    behavior: retained individual images according to the retention option and one
-    combined matrix. Enable it for per-item grids; **Also create the combined
-    overview** then becomes selectable.
-11. For direct comparisons, choose **LoRAs as rows** to place one LoRA's weights next
-    to each other, or **LoRAs as columns** to place them underneath each other. These
-    layouts support at most ten selected items and require identical weight sequences.
-12. Generate normally. Per-item pages are returned first; an enabled combined matrix
-    follows them.
+1. Open and enable **LoRA / Embedding Tester**. In **1. Selection**, choose LoRA or
+   Embedding, then select the folder, tested items, global weights, and optional
+   per-item overrides. The relevant inventory loads on first activation.
+2. In **2. Models & Run Size**, keep **Current model only** for the established
+   workflow or choose a sequential multiple-model mode and its checkpoints. Enable
+   **Extreme Run Mode** only above 500 cells per model or 25 checkpoints.
+3. In **3. Grid**, configure the repeated reference, legend, per-item grids,
+   combined overview, layout, columns, and margin. The reference is enabled by
+   default and repeated on every page.
+4. In **4. Output & Safety**, choose whether to retain individual images and keep
+   the recommended complete model unload enabled for matrix construction.
+5. Check the always-visible **Planned run** line below the tabs. It reports the
+   comparison/reference cells per model, selected model count, total generations,
+   and active Standard or Extreme limits. Invalid or incomplete settings are shown
+   there before generation.
+6. Generate normally. Per-item pages are returned first; an enabled combined matrix
+   follows them.
 
 The comparison-capacity line uses the current Forge width/height, selected-item count,
 legend, margin, and reference settings. It reports a safe maximum image count per item
 and a symmetric `0.5`-step range such as `-5:5:0.5`. Hi-Res output is checked again
 against the actual generated cell size and can split earlier.
 
-Generation is blocked while LoRA Tester is enabled and no LoRA is selected.
-Disabling the accordion leaves normal Forge generation unchanged.
+Generation is blocked when the selected LoRA/Embedding mode is missing its required
+item. Prompt-only multiple-model mode intentionally requires no LoRA. Disabling the
+accordion leaves normal Forge generation unchanged.
 
 ### Multiple models (`Unreleased`, development branch)
 
-The **Multiple models** section is optional. Its default **Current model only** mode
+The **2. Models & Run Size** tab is optional. Its default **Current model only** mode
 preserves the existing tester behavior. Two additional modes are available:
 
-- **One LoRA across selected models** requires Test Type **LoRA**, exactly one selected
-  LoRA, one shared weight or weight range, and up to 25 selected checkpoints. Extreme
-  Run Mode raises the checkpoint limit to 150.
+- **One LoRA across selected models** requires **LoRA** under **What should be
+  tested?**, exactly one selected LoRA, one shared weight or weight range, and up to
+  25 selected checkpoints. Extreme Run Mode raises the checkpoint limit to 150.
 - **Prompt only across selected models** does not require a LoRA. Internally it uses a
   no-op comparison case so the same fixed seed, disk spooling, matrix creation, and
   recovery path are reused without creating or loading an empty LoRA file.
@@ -149,8 +147,8 @@ require focused live validation before this mode is release-qualified.
 ### Embedding Test (`v0.3.0-beta`)
 
 1. Choose Forge UI Preset **xl**. This preset covers SDXL, Pony, and Illustrious.
-2. Open and enable **LoRA / Embedding Tester**, then choose **Embedding** as the
-   **Test Type**.
+2. Open and enable **LoRA / Embedding Tester**, then choose **Embedding** under
+   **What should be tested?** in **1. Selection**.
 3. The list is available before the checkpoint is loaded. It scans only Safetensors
    headers for both `clip_l` and `clip_g`; tensor data is not loaded. Click
    **Refresh Compatible Embeddings** after adding files.

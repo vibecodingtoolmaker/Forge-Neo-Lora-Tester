@@ -88,6 +88,7 @@ METHODS = load_methods(
     "_compose_embedding_prompt",
     "_maximum_total_cases",
     "_resolve_matrix_outputs",
+    "_run_summary_html",
     "_comparison_capacity_visible",
     "_estimated_label_header_height",
     "_comparison_capacity",
@@ -133,6 +134,7 @@ RecoveryHarness._maximum_total_cases = classmethod(METHODS["_maximum_total_cases
 RecoveryHarness._resolve_matrix_outputs = staticmethod(
     METHODS["_resolve_matrix_outputs"]
 )
+RecoveryHarness._run_summary_html = classmethod(METHODS["_run_summary_html"])
 RecoveryHarness._comparison_capacity_visible = classmethod(
     METHODS["_comparison_capacity_visible"]
 )
@@ -855,6 +857,68 @@ class MultiModelPlanTests(unittest.TestCase):
         self.assertEqual(state["model_results"][0]["status"], "unload-failed")
         self.assertFalse(state["model_results"][0]["unloaded"])
         self.assertTrue(state["original_model_restored"])
+
+
+class RunSummaryTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = RecoveryHarness()
+
+    def summary(self, **overrides):
+        values = {
+            "test_type": self.harness.TEST_TYPE_LORA,
+            "selected_loras": ["a.safetensors", "b.safetensors"],
+            "global_lora_weights": "0:1:0.5",
+            "lora_settings": [],
+            "selected_embeddings": [],
+            "global_embedding_weights": "1.0",
+            "embedding_settings": [],
+            "include_reference": True,
+            "multi_model_mode": self.harness.MULTI_MODEL_CURRENT,
+            "selected_checkpoints": [],
+            "extreme_run_mode": False,
+        }
+        values.update(overrides)
+        return self.harness._run_summary_html(**values)
+
+    def test_current_model_summary_counts_weights_and_reference(self):
+        summary = self.summary()
+
+        self.assertIn("6 comparison cell(s) + 1 reference", summary)
+        self.assertIn("current model", summary)
+        self.assertIn("7 generation(s)", summary)
+        self.assertIn("500 cells/model", summary)
+
+    def test_per_item_overrides_are_included_in_summary(self):
+        summary = self.summary(
+            selected_loras=["a.safetensors", "b.safetensors"],
+            global_lora_weights="1.0",
+            lora_settings=[
+                ["a.safetensors", "", "0", "1", "1"],
+                ["b.safetensors", "", "", "", ""],
+            ],
+            include_reference=False,
+        )
+
+        self.assertIn("3 comparison cell(s)", summary)
+        self.assertIn("reference disabled", summary)
+        self.assertIn("3 generation(s)", summary)
+
+    def test_prompt_only_summary_counts_selected_models(self):
+        summary = self.summary(
+            multi_model_mode=self.harness.MULTI_MODEL_PROMPT,
+            selected_checkpoints=["a", "b", "c", "d"],
+        )
+
+        self.assertIn("Prompt only", summary)
+        self.assertIn("4 model(s)", summary)
+        self.assertIn("4 generation(s)", summary)
+        self.assertIn("25 models", summary)
+
+    def test_invalid_weight_preview_warns_without_starting_a_run(self):
+        summary = self.summary(global_lora_weights="not-a-weight")
+
+        self.assertIn("lora-tester-run-summary-warning", summary)
+        self.assertIn("Correct the global weight specification", summary)
 
 
 class MatrixOnlyRecoveryTests(unittest.TestCase):
@@ -1806,6 +1870,18 @@ class EmbeddingCompatibilityTests(unittest.TestCase):
 
 
 class UiCallbackContractTests(unittest.TestCase):
+    def test_ui_uses_four_workflow_tabs_without_nested_accordions(self):
+        source = SOURCE_PATH.read_text(encoding="utf-8")
+
+        for tab_label in (
+            "1. Selection",
+            "2. Models & Run Size",
+            "3. Grid",
+            "4. Output & Safety",
+        ):
+            self.assertIn(f'with gr.Tab("{tab_label}"):', source)
+        self.assertNotIn("with gr.Accordion(", source)
+
     def test_removed_ram_watchdog_is_absent_from_runtime_source(self):
         source = SOURCE_PATH.read_text(encoding="utf-8")
 

@@ -19,3 +19,23 @@
     margin: 0.25rem 0 0.5rem;
     color: var(--body-text-color-subdued);
 }
+
+.lora-tester-section-note {
+    margin: 0.25rem 0 0.5rem;
+    color: var(--body-text-color-subdued);
+    font-size: 0.9em;
+}
+
+.lora-tester-run-summary,
+.lora-tester-safety-note {
+    margin-top: 0.75rem;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--block-radius, 8px);
+    background: var(--background-fill-secondary);
+    color: var(--body-text-color);
+}
+
+.lora-tester-run-summary-warning {
+    border-color: var(--warning-500, #d99a35);
+}

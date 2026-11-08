@@ -377,8 +377,9 @@ class LoRaTesterScript(scripts.Script):
         if mode == cls.MULTI_MODEL_LORA:
             if test_type != cls.TEST_TYPE_LORA:
                 return (
-                    "One-LoRA/multiple-model mode requires Test Type 'LoRA'. "
-                    "Switch the test type or choose Prompt-only mode."
+                    "One-LoRA/multiple-model mode requires LoRA under "
+                    "'What should be tested?'. Switch the selection or choose "
+                    "Prompt-only mode."
                 )
             selected_loras = list(lora_selection or [])
             if len(selected_loras) != 1:
@@ -549,7 +550,7 @@ class LoRaTesterScript(scripts.Script):
         )
 
     @classmethod
-    def _parse_weight_spec(cls, spec, description):
+    def _parse_weight_spec(cls, spec, description, report_errors=True):
         """Parse either one weight or an inclusive start:end:step range."""
         text = "" if spec is None else str(spec).strip()
         if not text:
@@ -558,25 +559,35 @@ class LoRaTesterScript(scripts.Script):
         try:
             parts = [Decimal(part.strip()) for part in text.split(':')]
         except (InvalidOperation, ValueError):
-            print(f"[LoRA Tester] Invalid {description} weight specification: {text!r}")
+            if report_errors:
+                print(
+                    f"[LoRA Tester] Invalid {description} weight specification: {text!r}"
+                )
             return None
 
         if not all(value.is_finite() for value in parts):
-            print(f"[LoRA Tester] Non-finite {description} weight specification: {text!r}")
+            if report_errors:
+                print(
+                    f"[LoRA Tester] Non-finite {description} weight specification: {text!r}"
+                )
             return None
 
         if len(parts) == 1:
             return [float(parts[0])]
         if len(parts) != 3:
-            print(
-                f"[LoRA Tester] Invalid {description} weight specification: {text!r}. "
-                "Use a number or start:end:step."
-            )
+            if report_errors:
+                print(
+                    f"[LoRA Tester] Invalid {description} weight specification: {text!r}. "
+                    "Use a number or start:end:step."
+                )
             return None
 
         start, end, step = parts
         if step == 0:
-            print(f"[LoRA Tester] Invalid {description} weight range: step must not be zero")
+            if report_errors:
+                print(
+                    f"[LoRA Tester] Invalid {description} weight range: step must not be zero"
+                )
             return None
 
         direction = Decimal(1) if end >= start else Decimal(-1)
@@ -590,10 +601,11 @@ class LoRaTesterScript(scripts.Script):
             current += step
 
         if in_range(current):
-            print(
-                f"[LoRA Tester] {description} weight range contains more than "
-                f"{cls.MAX_WEIGHTS_PER_ITEM} values and was rejected"
-            )
+            if report_errors:
+                print(
+                    f"[LoRA Tester] {description} weight range contains more than "
+                    f"{cls.MAX_WEIGHTS_PER_ITEM} values and was rejected"
+                )
             return None
 
         return values
@@ -616,6 +628,151 @@ class LoRaTesterScript(scripts.Script):
         return per_item_grids, (
             bool(combined_overview) if per_item_grids else True
         )
+
+    @classmethod
+    def _run_summary_html(
+        cls,
+        test_type,
+        selected_loras,
+        global_lora_weights,
+        lora_settings,
+        selected_embeddings,
+        global_embedding_weights,
+        embedding_settings,
+        include_reference,
+        multi_model_mode,
+        selected_checkpoints,
+        extreme_run_mode,
+    ):
+        """Describe the planned run without mutating or validating Forge state."""
+
+        mode = multi_model_mode or cls.MULTI_MODEL_CURRENT
+        checkpoints = list(selected_checkpoints or [])
+        model_count = 1 if mode == cls.MULTI_MODEL_CURRENT else len(checkpoints)
+        case_limit = cls._maximum_total_cases(extreme_run_mode)
+        model_limit = (
+            cls.MAX_EXTREME_MULTI_MODEL_CHECKPOINTS
+            if extreme_run_mode
+            else cls.MAX_MULTI_MODEL_CHECKPOINTS
+        )
+        limit_label = "Extreme" if extreme_run_mode else "Standard"
+
+        def summary(message, warning=False):
+            classes = "lora-tester-run-summary"
+            if warning:
+                classes += " lora-tester-run-summary-warning"
+            return f"<div class='{classes}'>{message}</div>"
+
+        if mode != cls.MULTI_MODEL_CURRENT and not checkpoints:
+            return summary(
+                "<b>Planned run:</b> Select at least one checkpoint in "
+                "<b>2. Models &amp; Run Size</b>.",
+                warning=True,
+            )
+
+        if mode == cls.MULTI_MODEL_PROMPT:
+            over_limit = model_count > model_limit
+            message = (
+                f"<b>Planned run:</b> Prompt only &middot; {model_count} model(s) "
+                f"= <b>{model_count} generation(s)</b> &middot; {limit_label} limit: "
+                f"{model_limit} models"
+            )
+            if over_limit:
+                message += " &middot; <b>Reduce the model selection</b>"
+            return summary(message, warning=over_limit)
+
+        embedding_mode = test_type == cls.TEST_TYPE_EMBEDDING
+        selected_items = list(
+            (selected_embeddings if embedding_mode else selected_loras) or []
+        )
+        item_name = "Embedding" if embedding_mode else "LoRA"
+        if not selected_items:
+            return summary(
+                f"<b>Planned run:</b> Select at least one {item_name} in "
+                "<b>1. Selection</b>.",
+                warning=True,
+            )
+        if mode == cls.MULTI_MODEL_LORA and (
+            embedding_mode or len(selected_items) != 1
+        ):
+            return summary(
+                "<b>Planned run:</b> Multiple-model LoRA mode requires exactly one "
+                "selected LoRA.",
+                warning=True,
+            )
+
+        global_spec = (
+            global_embedding_weights if embedding_mode else global_lora_weights
+        )
+        global_text = cls._cell_text(global_spec)
+        global_weights = (
+            cls._parse_weight_spec(global_text, "global", report_errors=False)
+            if global_text
+            else [1.0]
+        )
+        if global_weights is None:
+            return summary(
+                "<b>Planned run:</b> Correct the global weight specification in "
+                "<b>1. Selection</b>.",
+                warning=True,
+            )
+
+        if embedding_mode:
+            settings = {
+                str(row[0]): row
+                for row in cls._coerce_embedding_settings_rows(embedding_settings)
+                if row[0] not in (None, "")
+            }
+            weight_offset = 3
+        else:
+            settings = {
+                str(row[0]): row
+                for row in cls._coerce_settings_rows(lora_settings)
+                if row[0] not in (None, "")
+            }
+            weight_offset = 2
+
+        comparison_cells = 0
+        for item in selected_items:
+            weights, weight_error = cls._resolve_item_weights(
+                settings.get(str(item)),
+                weight_offset,
+                global_weights,
+                str(item),
+                report_errors=False,
+            )
+            if weight_error:
+                return summary(
+                    f"<b>Planned run:</b> Correct the incomplete or invalid per-{item_name} "
+                    "weight settings in <b>1. Selection</b>.",
+                    warning=True,
+                )
+            comparison_cells += len(weights)
+
+        reference_cells = 1 if include_reference else 0
+        cells_per_model = comparison_cells + reference_cells
+        total_generations = cells_per_model * model_count
+        over_case_limit = cells_per_model > case_limit
+        over_model_limit = mode != cls.MULTI_MODEL_CURRENT and model_count > model_limit
+        reference_text = (
+            " + 1 reference" if reference_cells else " &middot; reference disabled"
+        )
+        model_text = (
+            "current model"
+            if mode == cls.MULTI_MODEL_CURRENT
+            else f"{model_count} models"
+        )
+        message = (
+            f"<b>Planned run:</b> {len(selected_items)} {item_name}(s) &middot; "
+            f"{comparison_cells} comparison cell(s){reference_text} &middot; {model_text} "
+            f"= <b>{total_generations} generation(s)</b> &middot; {limit_label} limits: "
+            f"{case_limit:,} cells/model"
+        )
+        if mode != cls.MULTI_MODEL_CURRENT:
+            message += f", {model_limit} models"
+        if over_case_limit or over_model_limit:
+            message += " &middot; <b>Reduce the run or change Extreme Run Mode</b>"
+        return summary(message, warning=over_case_limit or over_model_limit)
 
     @classmethod
     def _comparison_capacity_visible(
@@ -805,7 +962,14 @@ class LoRaTesterScript(scripts.Script):
         )
 
     @classmethod
-    def _resolve_item_weights(cls, settings_row, weight_offset, global_weights, item):
+    def _resolve_item_weights(
+        cls,
+        settings_row,
+        weight_offset,
+        global_weights,
+        item,
+        report_errors=True,
+    ):
         """Resolve one optional Min/Max/Step override without silent fallback."""
 
         if settings_row is None:
@@ -817,7 +981,11 @@ class LoRaTesterScript(scripts.Script):
         if not minimum and not maximum and not step:
             return global_weights, None
         if minimum and not maximum and not step:
-            weights = cls._parse_weight_spec(minimum, item)
+            weights = cls._parse_weight_spec(
+                minimum,
+                item,
+                report_errors=report_errors,
+            )
             if weights is None:
                 return None, (
                     f"The individual weight for '{item}' is invalid. Enter one "
@@ -827,7 +995,9 @@ class LoRaTesterScript(scripts.Script):
             return weights, None
         if minimum and maximum and step:
             weights = cls._parse_weight_spec(
-                f"{minimum}:{maximum}:{step}", item
+                f"{minimum}:{maximum}:{step}",
+                item,
+                report_errors=report_errors,
             )
             if weights is None:
                 return None, (
@@ -1516,419 +1686,402 @@ class LoRaTesterScript(scripts.Script):
         """Create the UI for LoRA Tester"""
 
         with InputAccordion(False, label="LoRA / Embedding Tester", elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester") as lora_tester_enabled:
-            test_type = gr.Radio(
-                choices=[self.TEST_TYPE_LORA, self.TEST_TYPE_EMBEDDING],
-                value=self.TEST_TYPE_LORA,
-                label="Test Type",
-                info=(
-                    "Embedding Test currently supports SDXL, Pony, and Illustrious "
-                    "checkpoints with dual-encoder SDXL embeddings."
-                ),
-                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_type",
-            )
-
-            with gr.Group(visible=True) as lora_controls:
-                with FormRow():
-                    refresh_loras_btn = gr.Button(
-                        "Refresh LoRA List", variant="secondary", size="sm"
-                    )
-
-                with FormRow():
-                    lora_folder = gr.Dropdown(
-                        choices=[("Manual selection (all folders)", self.ALL_LORA_FOLDERS)],
-                        value=self.ALL_LORA_FOLDERS,
-                        label="LoRA Folder",
+            with gr.Tabs(
+                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_tabs"
+            ):
+                with gr.Tab("1. Selection"):
+                    test_type = gr.Radio(
+                        choices=[self.TEST_TYPE_LORA, self.TEST_TYPE_EMBEDDING],
+                        value=self.TEST_TYPE_LORA,
+                        label="What should be tested?",
                         info=(
-                            "Selecting a specific folder loads all LoRAs in that scope into "
-                            "the selection and per-LoRA table. Manual selection shows all LoRAs "
-                            "but only tests those selected explicitly."
+                            "Embedding Test currently supports SDXL, Pony, and "
+                            "Illustrious checkpoints with dual-encoder SDXL embeddings."
                         ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_folder"
-                    )
-                    include_subfolders = gr.Checkbox(
-                        value=True,
-                        label="Include subfolders",
-                        info="Also include LoRAs stored below the selected folder.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_include_subfolders"
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_type",
                     )
 
-                with FormRow():
-                    lora_selection = gr.Dropdown(
-                        choices=[],
-                        multiselect=True,
-                        label="Select LoRAs to Test",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_selection",
-                        info="Select one or more LoRAs to test with the current prompt"
+                    with gr.Group(visible=True) as lora_controls:
+                        with FormRow():
+                            refresh_loras_btn = gr.Button(
+                                "Refresh LoRA List", variant="secondary", size="sm"
+                            )
+                        with FormRow():
+                            lora_folder = gr.Dropdown(
+                                choices=[(
+                                    "Manual selection (all folders)",
+                                    self.ALL_LORA_FOLDERS,
+                                )],
+                                value=self.ALL_LORA_FOLDERS,
+                                label="LoRA Folder",
+                                info=(
+                                    "A folder selection loads every LoRA in that scope. "
+                                    "Manual selection tests only explicitly selected LoRAs."
+                                ),
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_folder",
+                            )
+                            include_subfolders = gr.Checkbox(
+                                value=True,
+                                label="Include subfolders",
+                                info="Also include LoRAs below the selected folder.",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_include_subfolders",
+                            )
+                        lora_selection = gr.Dropdown(
+                            choices=[],
+                            multiselect=True,
+                            label="Select LoRAs to Test",
+                            info="Select one or more LoRAs to test with the current prompt.",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_selection",
+                        )
+                        global_weight_spec = gr.Textbox(
+                            value="1.0",
+                            label="Global LoRA Weight(s)",
+                            placeholder="1.0 or -3:3:0.5",
+                            info=(
+                                "Use one value or an inclusive start:end:step range. "
+                                "The table below can override individual LoRAs."
+                            ),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_weights",
+                        )
+                        with FormRow():
+                            use_trigger_words = gr.Checkbox(
+                                value=True,
+                                label="Insert Trigger Words",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_use_triggers",
+                            )
+                            trigger_position = gr.Radio(
+                                choices=["Start", "End"],
+                                value="Start",
+                                label="Trigger Word Position",
+                                info="Start = before the prompt. End = after the LoRA tag.",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_trigger_pos",
+                            )
+                        gr.HTML(
+                            value=(
+                                "<p class='lora-tester-section-note'>"
+                                "Per-LoRA overrides: <code>0.8 | blank | blank</code> "
+                                "uses one weight; <code>-1 | 1 | 0.25</code> uses a range. "
+                                "Blank weight cells use the global setting. Blank triggers "
+                                "use metadata; <code>&lt;none&gt;</code> disables them.</p>"
+                            )
+                        )
+                        lora_settings = gr.Dataframe(
+                            value=[],
+                            headers=[
+                                "LoRA (do not edit)",
+                                "Trigger words (comma-separated)",
+                                "Min / single weight",
+                                "Max",
+                                "Step",
+                            ],
+                            datatype=["str", "str", "str", "str", "str"],
+                            type="array",
+                            row_count=(0, "dynamic"),
+                            col_count=(5, "fixed"),
+                            interactive=True,
+                            visible=False,
+                            wrap=True,
+                            height=300,
+                            column_widths=["30%", "34%", "14%", "11%", "11%"],
+                            label="Selected LoRA Settings",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_settings",
+                        )
+
+                    with gr.Group(visible=False) as embedding_controls:
+                        preset_bridge = gr.Textbox(
+                            value=resolve_forge_preset(forge_options=shared.opts),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_bridge",
+                            elem_classes=["lora-tester-preset-bridge"],
+                        )
+                        preset_refresh_bridge = gr.Button(
+                            "Sync Forge preset",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_refresh",
+                            elem_classes=["lora-tester-preset-bridge"],
+                        )
+                        with FormRow():
+                            refresh_embeddings_btn = gr.Button(
+                                "Refresh Compatible Embeddings",
+                                variant="secondary",
+                                size="sm",
+                            )
+                        embedding_status = gr.HTML(
+                            value=(
+                                "<p class='lora-tester-section-note'>Choose Forge UI "
+                                "Preset <code>xl</code> to discover compatible Safetensors "
+                                "embeddings before loading a checkpoint.</p>"
+                            )
+                        )
+                        with FormRow():
+                            embedding_folder = gr.Dropdown(
+                                choices=[(
+                                    "Manual selection (all folders)",
+                                    self.ALL_EMBEDDING_FOLDERS,
+                                )],
+                                value=self.ALL_EMBEDDING_FOLDERS,
+                                label="Embedding Folder",
+                                info=(
+                                    "Safetensors headers are filtered for clip_l + clip_g; "
+                                    "the loaded checkpoint validates them at runtime."
+                                ),
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_folder",
+                            )
+                            include_embedding_subfolders = gr.Checkbox(
+                                value=True,
+                                label="Include subfolders",
+                                info="Also include compatible embeddings below the folder.",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_subfolders",
+                            )
+                        embedding_selection = gr.Dropdown(
+                            choices=[],
+                            multiselect=True,
+                            label="Select Embeddings to Test",
+                            info="Select one or more compatible textual inversion embeddings.",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_selection",
+                        )
+                        with FormRow():
+                            global_embedding_weight_spec = gr.Textbox(
+                                value="1.0",
+                                label="Global Embedding Weight(s)",
+                                placeholder="1.0 or 0.5:1.5:0.25",
+                                info=(
+                                    "Weights use Forge prompt attention. The table below "
+                                    "can override individual embeddings."
+                                ),
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_weights",
+                            )
+                            embedding_position = gr.Radio(
+                                choices=["Start", "End"],
+                                value="Start",
+                                label="Embedding Position",
+                                info="Insert the weighted embedding before or after the prompt.",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_position",
+                            )
+                        gr.HTML(
+                            value=(
+                                "<p class='lora-tester-section-note'>Blank triggers use "
+                                "JSON metadata or the filename; <code>&lt;none&gt;</code> "
+                                "suppresses the additional trigger. Set Negative prompt? "
+                                "to <code>0</code> for positive or <code>1</code> for "
+                                "negative injection.</p>"
+                            )
+                        )
+                        embedding_settings = gr.Dataframe(
+                            value=[],
+                            headers=[
+                                "Embedding (do not edit)",
+                                "Trigger words (comma-separated)",
+                                "Negative prompt? (0 = Positive, 1 = Negative)",
+                                "Min / single weight",
+                                "Max",
+                                "Step",
+                            ],
+                            datatype=["str", "str", "str", "str", "str", "str"],
+                            type="array",
+                            row_count=(0, "dynamic"),
+                            col_count=(6, "fixed"),
+                            interactive=True,
+                            visible=False,
+                            wrap=True,
+                            height=300,
+                            column_widths=["25%", "28%", "19%", "11%", "9%", "8%"],
+                            label="Selected Embedding Settings",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_settings",
+                        )
+
+                with gr.Tab("2. Models & Run Size"):
+                    multi_model_mode = gr.Radio(
+                        choices=[
+                            self.MULTI_MODEL_CURRENT,
+                            self.MULTI_MODEL_LORA,
+                            self.MULTI_MODEL_PROMPT,
+                        ],
+                        value=self.MULTI_MODEL_CURRENT,
+                        label="Which models should be used?",
+                        info=(
+                            "Multiple-model modes run complete Forge jobs sequentially "
+                            "and fully unload each checkpoint before loading the next."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_model_mode",
+                    )
+                    with gr.Group(visible=False) as multi_model_controls:
+                        with FormRow():
+                            refresh_checkpoints_btn = gr.Button(
+                                "Refresh Checkpoint List",
+                                variant="secondary",
+                                size="sm",
+                            )
+                        checkpoint_selection = gr.Dropdown(
+                            choices=self._checkpoint_choices(),
+                            multiselect=True,
+                            label="Select Models / Checkpoints",
+                            info=(
+                                "Standard mode supports 25 checkpoints; Extreme Run "
+                                "Mode supports 150. Forge remains the compatibility authority."
+                            ),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_checkpoint_selection",
+                        )
+                        gr.HTML(
+                            value=(
+                                "<p class='lora-tester-section-note'>Prompt-only loads no "
+                                "LoRA file but reuses the same fixed-seed, disk-spooling, "
+                                "matrix, and recovery path.</p>"
+                            )
+                        )
+                    extreme_run_mode = gr.Checkbox(
+                        value=False,
+                        label=(
+                            "Extreme Run Mode (up to 10,000 matrix cells / "
+                            "150 checkpoints)"
+                        ),
+                        info=(
+                            "CAUTION: Extreme runs can take many hours or days and use "
+                            "very large amounts of disk space. Standard limits are 500 "
+                            "cells per model and 25 checkpoints."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_extreme_run",
                     )
 
-                with FormRow():
-                    global_weight_spec = gr.Textbox(
-                        value="1.0",
-                        label="Global LoRA Weight(s)",
-                        placeholder="1.0 or -3:3:0.5",
-                        info="Use one value or an inclusive start:end:step range. Per-LoRA overrides are available below.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_weights"
-                    )
-
-                with gr.Accordion("Per-LoRA Settings", open=True):
+                with gr.Tab("3. Grid"):
                     with FormRow():
-                        use_trigger_words = gr.Checkbox(
+                        save_original = gr.Checkbox(
                             value=True,
-                            label="Insert Trigger Words",
-                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_use_triggers"
+                            label="Generate reference image without tested item (Recommended)",
+                            info=(
+                                "The fixed-seed reference is repeated at the top of every "
+                                "matrix page."
+                            ),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_baseline",
                         )
-                        trigger_position = gr.Radio(
-                            choices=["Start", "End"],
-                            value="Start",
-                            label="Trigger Word Position",
-                            info="Start = before the prompt. End = after the LoRA tag.",
-                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_trigger_pos"
+                        draw_legend = gr.Checkbox(
+                            value=True,
+                            label="Draw legend (names, weights, and triggers)",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_draw_legend",
                         )
-
-                    gr.HTML(
-                        value=(
-                            "<p style='color: #888; font-size: 0.9em;'>"
-                            "Examples: <code>0.8 | blank | blank</code> = one dedicated weight; "
-                            "<code>-1 | 1 | 0.25</code> = range from -1 to 1. "
-                            "Leave Min, Max, and Step blank to use the global setting. "
-                            "A blank trigger cell uses metadata; enter <code>&lt;none&gt;</code> "
-                            "to explicitly disable triggers for one LoRA.</p>"
-                        )
+                    per_item_grids = gr.Checkbox(
+                        value=False,
+                        label="Create one grid per tested LoRA or Embedding",
+                        info="Disabled returns the familiar single combined matrix.",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_per_item_grids",
                     )
-
-                    lora_settings = gr.Dataframe(
-                        value=[],
-                        headers=[
-                            "LoRA (do not edit)",
-                            "Trigger words (comma-separated)",
-                            "Min / single weight",
-                            "Max",
-                            "Step",
-                        ],
-                        datatype=["str", "str", "str", "str", "str"],
-                        type="array",
-                        row_count=(0, "dynamic"),
-                        col_count=(5, "fixed"),
-                        interactive=True,
-                        visible=False,
-                        wrap=True,
-                        height=300,
-                        column_widths=["30%", "34%", "14%", "11%", "11%"],
-                        label="Selected LoRA Settings",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_settings"
-                    )
-
-            with gr.Group(visible=False) as embedding_controls:
-                preset_bridge = gr.Textbox(
-                    value=resolve_forge_preset(forge_options=shared.opts),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_bridge",
-                    elem_classes=["lora-tester-preset-bridge"],
-                )
-                preset_refresh_bridge = gr.Button(
-                    "Sync Forge preset",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_refresh",
-                    elem_classes=["lora-tester-preset-bridge"],
-                )
-                with FormRow():
-                    refresh_embeddings_btn = gr.Button(
-                        "Refresh Compatible Embeddings", variant="secondary", size="sm"
-                    )
-
-                embedding_status = gr.HTML(
-                    value=(
-                        "<p style='color: #888; font-size: 0.9em;'>"
-                        "Choose Forge UI Preset <code>xl</code> to discover compatible "
-                        "Safetensors embeddings before loading a checkpoint.</p>"
-                    )
-                )
-
-                with FormRow():
-                    embedding_folder = gr.Dropdown(
-                        choices=[(
-                            "Manual selection (all folders)",
-                            self.ALL_EMBEDDING_FOLDERS,
-                        )],
-                        value=self.ALL_EMBEDDING_FOLDERS,
-                        label="Embedding Folder",
-                        info=(
-                            "Before model load, Safetensors headers are filtered for "
-                            "clip_l + clip_g. The loaded checkpoint validates them at runtime."
-                        ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_folder",
-                    )
-                    include_embedding_subfolders = gr.Checkbox(
+                    combined_overview = gr.Checkbox(
                         value=True,
-                        label="Include subfolders",
-                        info="Also include compatible embeddings below the selected folder.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_subfolders",
-                    )
-
-                embedding_selection = gr.Dropdown(
-                    choices=[],
-                    multiselect=True,
-                    label="Select Embeddings to Test",
-                    info="Select one or more compatible textual inversion embeddings.",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_selection",
-                )
-
-                with FormRow():
-                    global_embedding_weight_spec = gr.Textbox(
-                        value="1.0",
-                        label="Global Embedding Weight(s)",
-                        placeholder="1.0 or 0.5:1.5:0.25",
+                        interactive=False,
+                        label="Also create the combined overview",
                         info=(
-                            "Weights use Forge prompt attention. Per-embedding overrides "
-                            "are available below."
+                            "Available with per-item grids. Without them, the combined "
+                            "matrix remains the required primary output."
                         ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_weights",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_combined_overview",
                     )
-                    embedding_position = gr.Radio(
-                        choices=["Start", "End"],
-                        value="Start",
-                        label="Embedding Position",
-                        info="Insert the weighted embedding before or after the existing prompt.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_position",
+                    comparison_width_bridge = gr.Number(
+                        value=1024,
+                        precision=0,
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_width",
+                        elem_classes=["lora-tester-layout-bridge"],
                     )
-                with gr.Accordion("Per-Embedding Settings", open=True):
-                    gr.HTML(
-                        value=(
-                            "<p style='color: #888; font-size: 0.9em;'>"
-                            "Trigger words come from JSON metadata, with the filename as "
-                            "fallback. Edit comma-separated triggers or enter "
-                            "<code>&lt;none&gt;</code> to suppress the additional trigger. "
-                            "Set Negative prompt? to <code>0</code> for positive or "
-                            "<code>1</code> for negative injection. "
-                            "Use Min alone for one weight, fill Min/Max/Step for a range, "
-                            "or leave all three weight cells blank for the global setting.</p>"
-                        )
+                    comparison_height_bridge = gr.Number(
+                        value=1024,
+                        precision=0,
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_height",
+                        elem_classes=["lora-tester-layout-bridge"],
                     )
-                    embedding_settings = gr.Dataframe(
-                        value=[],
-                        headers=[
-                            "Embedding (do not edit)",
-                            "Trigger words (comma-separated)",
-                            "Negative prompt? (0 = Positive, 1 = Negative)",
-                            "Min / single weight",
-                            "Max",
-                            "Step",
-                        ],
-                        datatype=["str", "str", "str", "str", "str", "str"],
-                        type="array",
-                        row_count=(0, "dynamic"),
-                        col_count=(6, "fixed"),
-                        interactive=True,
+                    comparison_refresh_bridge = gr.Button(
+                        "Refresh comparison capacity",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_refresh",
+                        elem_classes=["lora-tester-layout-bridge"],
+                    )
+                    comparison_capacity = gr.HTML(
+                        value=self._comparison_capacity_html(
+                            self.TEST_TYPE_LORA, [], [], 1024, 1024, 5, True, True
+                        ),
                         visible=False,
-                        wrap=True,
-                        height=300,
-                        column_widths=["25%", "28%", "19%", "11%", "9%", "8%"],
-                        label="Selected Embedding Settings",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_settings",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_capacity",
                     )
-
-            with gr.Accordion("Multiple models (optional)", open=False):
-                multi_model_mode = gr.Radio(
-                    choices=[
-                        self.MULTI_MODEL_CURRENT,
-                        self.MULTI_MODEL_LORA,
-                        self.MULTI_MODEL_PROMPT,
-                    ],
-                    value=self.MULTI_MODEL_CURRENT,
-                    label="Model run mode",
-                    info=(
-                        "The existing tester remains unchanged in Current-model mode. "
-                        "Multiple-model modes run complete Forge jobs sequentially and "
-                        "fully unload each checkpoint before loading the next one."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_model_mode",
-                )
-                with gr.Group(visible=False) as multi_model_controls:
+                    comparison_layout = gr.Radio(
+                        choices=[
+                            self.MATRIX_LAYOUT_STANDARD,
+                            self.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
+                            self.MATRIX_LAYOUT_COMPARE_VERTICAL,
+                        ],
+                        value=self.MATRIX_LAYOUT_STANDARD,
+                        label="Combined matrix layout",
+                        info=(
+                            "Comparison rows/columns require identical weights for every "
+                            "item and support at most 10 items."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_layout",
+                    )
                     with FormRow():
-                        refresh_checkpoints_btn = gr.Button(
-                            "Refresh Checkpoint List",
-                            variant="secondary",
-                            size="sm",
+                        matrix_cols = gr.Slider(
+                            minimum=1,
+                            maximum=10,
+                            step=1,
+                            value=3,
+                            label="Standard combined matrix columns",
+                            info=(
+                                "Used only by the Standard order combined overview. "
+                                "Per-item grids keep an item's weights together."
+                            ),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_cols",
                         )
-                    checkpoint_selection = gr.Dropdown(
-                        choices=self._checkpoint_choices(),
-                        multiselect=True,
-                        label="Select Models / Checkpoints",
+                        matrix_margin = gr.Slider(
+                            minimum=0,
+                            maximum=50,
+                            step=1,
+                            value=5,
+                            label="Matrix Image Margin (px)",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_margin",
+                        )
+
+                with gr.Tab("4. Output & Safety"):
+                    output_retention = gr.Radio(
+                        choices=[self.KEEP_INDIVIDUAL_OUTPUT, self.MATRIX_ONLY_OUTPUT],
+                        value=self.KEEP_INDIVIDUAL_OUTPUT,
+                        label="Output retention",
                         info=(
-                            "Select up to 25 checkpoints, or up to 150 with Extreme "
-                            "Run Mode. Model-family preflight is "
-                            "intentionally deferred; a load or generation failure is "
-                            "recorded without changing the existing single-model test."
+                            "CAUTION: Matrix-only deletes individual comparison images "
+                            "only after every matrix page was created and validated. "
+                            "Failures retain the sources for recovery."
                         ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_checkpoint_selection",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_output_retention",
+                    )
+                    unload_models_before_matrix = gr.Checkbox(
+                        value=True,
+                        label=(
+                            "Unload checkpoint, text encoder and VAE before building "
+                            "the matrix (Recommended)"
+                        ),
+                        info=(
+                            "Frees Forge model RAM/VRAM for larger matrix pages. The "
+                            "selected checkpoint reloads automatically for the next job."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_unload_models",
                     )
                     gr.HTML(
                         value=(
-                            "<p style='color: #888; font-size: 0.9em;'>"
-                            "Prompt-only uses an internal no-op LoRA case: no LoRA file "
-                            "is loaded, but the same fixed-seed, disk-spooling, matrix, "
-                            "and recovery path is reused.</p>"
+                            "<div class='lora-tester-safety-note'><b>Active safeguards:</b> "
+                            "completed cells are spooled to disk, model state can be fully "
+                            "unloaded before composition, pages stay below the fixed axis "
+                            "and area limits, and Matrix-only sources are deleted only after "
+                            "successful validation.</div>"
                         )
                     )
 
-            with gr.Accordion("Advanced Options", open=False):
-                with FormRow():
-                    save_original = gr.Checkbox(
-                        value=True,
-                        label="Generate reference image without tested item (Recommended)",
-                        info=(
-                            "The fixed-seed reference is repeated at the top of every "
-                            "matrix page for direct comparison."
-                        ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_baseline"
-                    )
-
-                    draw_legend = gr.Checkbox(
-                        value=True,
-                        label="Draw legend in matrix grid (names, weights, and triggers)",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_draw_legend"
-                    )
-
-                per_item_grids = gr.Checkbox(
-                    value=False,
-                    label="Create one grid per tested LoRA or Embedding",
-                    info=(
-                        "Disabled keeps the former output: one combined matrix plus "
-                        "the selected individual-image retention mode."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_per_item_grids",
-                )
-
-                combined_overview = gr.Checkbox(
-                    value=True,
-                    interactive=False,
-                    label="Also create the combined overview",
-                    info=(
-                        "This choice becomes available when per-item grids are enabled. "
-                        "Without per-item grids the combined matrix is the required "
-                        "primary output."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_combined_overview",
-                )
-
-                comparison_width_bridge = gr.Number(
-                    value=1024,
-                    precision=0,
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_width",
-                    elem_classes=["lora-tester-layout-bridge"],
-                )
-                comparison_height_bridge = gr.Number(
-                    value=1024,
-                    precision=0,
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_height",
-                    elem_classes=["lora-tester-layout-bridge"],
-                )
-                comparison_refresh_bridge = gr.Button(
-                    "Refresh comparison capacity",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_refresh",
-                    elem_classes=["lora-tester-layout-bridge"],
-                )
-                comparison_capacity = gr.HTML(
-                    value=self._comparison_capacity_html(
-                        self.TEST_TYPE_LORA,
-                        [],
-                        [],
-                        1024,
-                        1024,
-                        5,
-                        True,
-                        True,
-                    ),
-                    visible=False,
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_capacity",
-                )
-                comparison_layout = gr.Radio(
-                    choices=[
-                        self.MATRIX_LAYOUT_STANDARD,
-                        self.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
-                        self.MATRIX_LAYOUT_COMPARE_VERTICAL,
-                    ],
-                    value=self.MATRIX_LAYOUT_STANDARD,
-                    label="Combined matrix layout",
-                    info=(
-                        "Rows keeps every item's weights together horizontally. "
-                        "Columns keeps every item's weights together vertically. "
-                        "Comparison layouts require identical weights for every item "
-                        "and support at most 10 items."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_layout",
-                )
-
-                extreme_run_mode = gr.Checkbox(
-                    value=False,
-                    label=(
-                        "Extreme Run Mode (up to 10,000 matrix cells / "
-                        "150 checkpoints)"
-                    ),
-                    info=(
-                        "CAUTION: Extreme runs can take many hours or days and may use "
-                        "very large amounts of disk space. Forge, driver, model, extension, "
-                        "or system instability cannot be ruled out during very long runs. "
-                        "This mode also raises the multiple-model limit from 25 to 150."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_extreme_run"
-                )
-
-                with FormRow():
-                    matrix_cols = gr.Slider(
-                        minimum=1,
-                        maximum=10,
-                        step=1,
-                        value=3,
-                        label="Standard combined matrix columns",
-                        info=(
-                            "Used only by the Standard order combined overview. "
-                            "Per-item grids always keep one item's weights in a "
-                            "horizontal row and split only at a safety limit."
-                        ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_cols"
-                    )
-
-                    matrix_margin = gr.Slider(
-                        minimum=0,
-                        maximum=50,
-                        step=1,
-                        value=5,
-                        label="Matrix Image Margin (px)",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_margin"
-                    )
-
-                output_retention = gr.Radio(
-                    choices=[
-                        self.KEEP_INDIVIDUAL_OUTPUT,
-                        self.MATRIX_ONLY_OUTPUT,
-                    ],
-                    value=self.KEEP_INDIVIDUAL_OUTPUT,
-                    label="Output retention",
-                    info=(
-                        "CAUTION: Matrix-only mode permanently deletes all individual "
-                        "comparison images, but only after every matrix page has been "
-                        "created successfully. If matrix creation fails, the individual "
-                        "images are kept for recovery."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_output_retention"
-                )
-
-                unload_models_before_matrix = gr.Checkbox(
-                    value=True,
-                    label="Unload checkpoint, text encoder and VAE before building the matrix",
-                    info=(
-                        "Frees Forge's model RAM/VRAM for larger matrix pages. "
-                        "The selected checkpoint is reloaded automatically for the next generation."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_unload_models"
-                )
-
-            gr.HTML(
-                value=(
-                    "<p style='color: #888; font-size: 0.9em;'>"
-                    "The extension returns one or more labeled matrix pages. Each "
-                    "LoRA/weight or Embedding/weight combination creates one matrix "
-                    "cell and uses the same fixed seed.</p>"
-                )
+            run_summary = gr.HTML(
+                value=self._run_summary_html(
+                    self.TEST_TYPE_LORA,
+                    [],
+                    "1.0",
+                    [],
+                    [],
+                    "1.0",
+                    [],
+                    True,
+                    self.MULTI_MODEL_CURRENT,
+                    [],
+                    False,
+                ),
+                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_run_summary",
             )
 
         # Event handlers
@@ -2135,6 +2288,33 @@ class LoRaTesterScript(scripts.Script):
 
         def toggle_multi_model_controls(selected_mode):
             return gr.update(visible=selected_mode != self.MULTI_MODEL_CURRENT)
+
+        def update_run_summary(
+            selected_type,
+            selected_loras,
+            lora_weights,
+            selected_lora_settings,
+            selected_embeddings,
+            embedding_weights,
+            selected_embedding_settings,
+            reference_enabled,
+            selected_model_mode,
+            selected_models,
+            extreme_enabled,
+        ):
+            return self._run_summary_html(
+                selected_type,
+                selected_loras,
+                lora_weights,
+                selected_lora_settings,
+                selected_embeddings,
+                embedding_weights,
+                selected_embedding_settings,
+                reference_enabled,
+                selected_model_mode,
+                selected_models,
+                extreme_enabled,
+            )
 
         def update_checkpoint_list(selected_checkpoints):
             choices = self._checkpoint_choices(refresh=True)
@@ -2419,6 +2599,28 @@ class LoRaTesterScript(scripts.Script):
             queue=False,
             show_progress=False,
         )
+
+        run_summary_inputs = [
+            test_type,
+            lora_selection,
+            global_weight_spec,
+            lora_settings,
+            embedding_selection,
+            global_embedding_weight_spec,
+            embedding_settings,
+            save_original,
+            multi_model_mode,
+            checkpoint_selection,
+            extreme_run_mode,
+        ]
+        for component in run_summary_inputs:
+            component.change(
+                fn=update_run_summary,
+                inputs=run_summary_inputs,
+                outputs=[run_summary],
+                queue=False,
+                show_progress=False,
+            )
 
         # Return all components that will be passed to processing callbacks.
         return [

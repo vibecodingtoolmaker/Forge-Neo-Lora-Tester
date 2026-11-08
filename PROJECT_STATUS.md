@@ -25,8 +25,9 @@ then this document, `README.md`, and the current Git diff before changing code.
 
 ## Development progress — 2026-11-08
 
-The first one-LoRA/prompt-only multiple-checkpoint implementation is now present
-locally on `develop` and remains uncommitted.
+The first one-LoRA/prompt-only multiple-checkpoint implementation and RAM-watchdog
+removal were frozen in local `develop` commit `3557f45`. The workflow-tab UI cleanup
+described below follows as the next change on `develop`.
 
 Implemented:
 
@@ -52,16 +53,27 @@ Implemented:
   commit checks, callback parameters, and dormant manifest fields have been removed.
   Disk spooling, full model unload, fixed run limits, static page limits, multi-page
   composition, and recovery-safe cleanup remain active.
+- Nested Per-LoRA/Embedding, Multiple models, and Advanced accordions were replaced
+  with four numbered workflow tabs: Selection, Models & Run Size, Grid, and Output &
+  Safety. Per-item tables now appear directly in Selection when populated.
+- An always-visible planned-run summary reuses the production weight parser and
+  per-item override rules to show comparison cells, reference, models, total
+  generations, active limits, and incomplete/invalid setup warnings.
 
 Verified in this development pass:
 
-- 61 unit tests pass in Forge's Python environment, including the simplified UI
-  callback contract, explicit watchdog-removal guard, run-plan validation,
+- 66 unit tests pass in Forge's Python environment, including the four-tab structure,
+  planned-run calculations, simplified UI callback contract, explicit
+  watchdog-removal guard, run-plan validation,
   prompt-only recursion guard, manifest
   fields, strict run/unload ordering, unload-failure abort, processing-reference
   release, restoration input/state handoff, shared-grid aggregation, and real PNG
   composition for multiple model pages.
-- Production syntax, Ruff fatal-error checks, and `git diff --check` pass.
+- Production syntax and Ruff fatal-error checks pass. An isolated Gradio 4.40 UI
+  construction using Forge's official import bootstrap returned all 23 processing
+  components successfully, and `git diff --check` passes. A 1600x1400 local
+  Headless-Chrome preview confirmed the four-tab header, Selection layout, and
+  warning summary styling. Full interaction still requires a restarted-Forge smoke.
 
 Not yet proven:
 
@@ -665,6 +677,8 @@ files. See `AGENTS.md` for the release procedure.
 - `_resolve_embedding_target()`: validates per-row `0`/`1` prompt routing.
 - `_compose_embedding_prompt()`: weighted positive/negative prompt injection.
 - `_maximum_total_cases()`: chooses 500 normal or 10,000 Extreme limit.
+- `_run_summary_html()`: previews item, per-model cell, reference, checkpoint, total
+  generation, and active limit counts without mutating Forge state.
 - `_compose_lora_prompt()`: Start/End trigger placement and LoRA injection.
 - `before_process()`: validates UI data, expands cases, creates run state/manifest.
 - `_force_batch_rng_seed()`: enforces the shared resolved seed for every cell.
