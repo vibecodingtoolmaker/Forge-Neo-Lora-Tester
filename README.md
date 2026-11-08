@@ -5,10 +5,11 @@ and weight ranges with one prompt and one fixed seed. It returns the familiar co
 matrix by default and can optionally add one labeled, safety-bounded grid per tested
 item.
 
-> **Project status:** `v0.3.0-beta` public prerelease. Extreme Run Mode completed a
-> 2,743-cell stress test covering 211 LoRAs with 13 weights each. Known limitations
-> remain; keep recoverable individual images enabled for important runs and please
-> report reproducible issues.
+> **Project status:** `main` contains the current post-`v0.3.0-beta` snapshot; the
+> latest tagged release remains `v0.3.0-beta`. Extreme Run Mode completed a 2,743-cell
+> stress test covering 211 LoRAs with 13 weights each. Known limitations remain; keep
+> recoverable individual images enabled for important runs and report reproducible
+> issues.
 
 > **Beta confidence boundary:** Embedding Test supports dual-encoder SDXL, Pony, and
 > Illustrious checkpoints. Live UI/preset validation and a txt2img run through matrix
@@ -69,9 +70,9 @@ affiliated with or endorsed by OpenAI.
   Pony, or Illustrious checkpoint before generation
 - Supports global/per-Embedding weight ranges, Start/End placement, and a per-row
   `0`/`1` choice for positive or negative injection, including matching Hi-Res prompts
-- On the development branch, optionally runs exactly one LoRA or the unchanged prompt
-  across up to 25 checkpoints normally or 150 in Extreme Run Mode, strictly
-  sequentially with a complete unload between model jobs
+- Optionally runs exactly one LoRA or the unchanged prompt across up to 25 checkpoints
+  normally or 150 in Extreme Run Mode, strictly sequentially with a complete unload
+  between model jobs
 
 ## Requirements
 
@@ -117,7 +118,7 @@ Generation is blocked when the selected LoRA/Embedding mode is missing its requi
 item. Prompt-only multiple-model mode intentionally requires no LoRA. Disabling the
 accordion leaves normal Forge generation unchanged.
 
-### Multiple models (`Unreleased`, development branch)
+### Multiple models
 
 The **2. Models & Run Size** tab is optional. Its default **Current model only** mode
 preserves the existing tester behavior. Two additional modes are available:
