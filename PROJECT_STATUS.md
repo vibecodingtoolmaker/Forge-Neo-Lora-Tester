@@ -13,6 +13,9 @@ then this document, `README.md`, and the current Git diff before changing code.
 
 - Current public release: **v0.3.0-beta** (GitHub pre-release, 2026-08-14).
 - Release tag: `v0.3.0-beta` -> `main` commit `d67569e`.
+- Current public `main` snapshot: commit `a255d7f` with the multi-model workflow,
+  removed RAM watchdog, shared model grid, and four-tab UI. This snapshot is newer
+  than the latest tagged release.
 - Release preparation on `develop`: commit `f274768`; the feature snapshot immediately
   before it is `1a784f1`.
 - Previous public release: **v0.2.0-beta.1**, tag to `main` commit `14c6dae`.
@@ -87,6 +90,35 @@ Not yet proven:
 - Remaining live gates include one-LoRA same-family checkpoints, repeated unload/reload,
   interruption/failure retention, original-model restoration, img2img, and finally
   focused KREA and MOSS runs.
+
+## Next agreed expansion — multi-item across checkpoints
+
+The maintainer fixed the next feature contract on 2026-11-08:
+
+1. **Multiple LoRAs across multiple checkpoints**
+   - Checkpoints are the outer loop and are loaded exactly once per model job.
+   - Generate one fixed-seed baseline per checkpoint, then test every selected LoRA
+     individually on that checkpoint. LoRA combinations are explicitly out of scope.
+   - Preserve each LoRA's global/per-item weight sequence; with one weight the logical
+     columns are Baseline, LoRA 1, LoRA 2, and so on. With ranges, group columns by
+     LoRA and weight.
+   - Isolate a failing LoRA/checkpoint case as a labeled placeholder and continue the
+     remaining cases for that checkpoint whenever Forge state remains usable.
+   - Persist every completed cell immediately, fully unload before the next checkpoint,
+     restore the original model selection, and build one labeled shared matrix with
+     the existing safe page splitting and recovery guarantees.
+2. **Embeddings across multiple checkpoints**
+   - After the multi-LoRA path is stable, apply the same checkpoint-outer/item-inner
+     execution and matrix design to Embeddings.
+   - Revalidate compatibility against each loaded checkpoint's two Forge-owned SDXL
+     embedding databases. Represent incompatible or failed pairs as explicit labeled
+     skip/error placeholders rather than silently omitting them.
+
+The current outer coordinator already provides sequential checkpoint jobs, fixed seed,
+disk persistence, full unload, restoration, manifests, and shared-grid aggregation.
+The next implementation should extend the run-plan contract beyond exactly one LoRA,
+update the planned-run summary, and add case-level placeholder/error isolation without
+introducing simultaneous LoRA combinations or a second model/encoder.
 
 ## Release completion — 2026-08-14
 
