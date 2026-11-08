@@ -2,12 +2,14 @@
 
 LoRA Tester compares multiple LoRAs or SDXL-compatible textual inversion embeddings
 and weight ranges with one prompt and one fixed seed. It returns the familiar combined
-matrix by default and can optionally add one labeled, RAM-aware grid per tested item.
+matrix by default and can optionally add one labeled, safety-bounded grid per tested
+item.
 
-> **Project status:** `v0.3.0-beta` public prerelease. Extreme Run Mode completed a
-> 2,743-cell stress test covering 211 LoRAs with 13 weights each. Known limitations
-> remain; keep recoverable individual images enabled for important runs and please
-> report reproducible issues.
+> **Project status:** `main` contains the current post-`v0.3.0-beta` snapshot; the
+> latest tagged release remains `v0.3.0-beta`. Extreme Run Mode completed a 2,743-cell
+> stress test covering 211 LoRAs with 13 weights each. Known limitations remain; keep
+> recoverable individual images enabled for important runs and report reproducible
+> issues.
 
 > **Beta confidence boundary:** Embedding Test supports dual-encoder SDXL, Pony, and
 > Illustrious checkpoints. Live UI/preset validation and a txt2img run through matrix
@@ -52,9 +54,12 @@ affiliated with or endorsed by OpenAI.
   becomes an optional additional output
 - Offers aligned comparison layouts with every LoRA in one row or one column
 - Offers an explicit Extreme Run Mode for up to 10,000 matrix cells
+- Organizes setup into four workflow tabs: Selection, Models & Run Size, Grid, and
+  Output & Safety
+- Shows an always-visible planned-run summary with comparison cells, reference,
+  model count, total generations, and the active Standard/Extreme limits
 - Writes completed cells to disk instead of retaining decoded images in RAM
 - Builds labeled row strips on disk before composing the final matrix
-- Retains the adaptive RAM-protection implementation behind a disabled release switch
 - Can unload the checkpoint, text encoder, and VAE before matrix construction
 - Keeps lossless individual source images by default
 - Offers recovery-safe matrix-only cleanup after successful matrix validation
@@ -65,14 +70,16 @@ affiliated with or endorsed by OpenAI.
   Pony, or Illustrious checkpoint before generation
 - Supports global/per-Embedding weight ranges, Start/End placement, and a per-row
   `0`/`1` choice for positive or negative injection, including matching Hi-Res prompts
+- Optionally runs exactly one LoRA or the unchanged prompt across up to 25 checkpoints
+  normally or 150 in Extreme Run Mode, strictly sequentially with a complete unload
+  between model jobs
 
 ## Requirements
 
 - Stable Diffusion WebUI Forge - Neo
 - A Forge environment that provides Gradio and Pillow
 
-The extension does not install or download packages by itself. The optional
-`psutil`-based RAM watchdog is disabled for the `v0.3.0-beta` prerelease.
+The extension does not install or download packages by itself.
 
 ## Installation
 
@@ -84,43 +91,65 @@ The **LoRA / Embedding Tester** accordion is available in both txt2img and img2i
 
 ## Usage
 
-1. Open and enable **LoRA / Embedding Tester**. Keep **Test Type** set to **LoRA**.
-   The LoRA inventory loads on first activation.
-2. Choose a folder or keep **Manual selection (all folders)**. Selecting a specific
-   folder selects all LoRAs in that scope. Manual mode tests only explicitly
-   selected LoRAs.
-3. Use **Include subfolders** to control whether descendants of the chosen folder
-   are included. Click **Refresh LoRA List** after adding or removing model files.
-4. Enter one global weight or range.
-5. Edit trigger words or weight overrides in the per-LoRA table if needed.
-6. Configure the reference image, trigger position, label display, matrix columns,
-   and margin. The reference is enabled by default and repeated on every page.
-7. Choose an output-retention mode. Keeping individual images is the safe default.
-8. Keep model unloading enabled so matrix creation can use the released RAM.
-9. Enable **Extreme Run Mode** only for deliberately large jobs above 500 cells.
-10. Leave **Create one grid per tested LoRA or Embedding** disabled for the former
-    behavior: retained individual images according to the retention option and one
-    combined matrix. Enable it for per-item grids; **Also create the combined
-    overview** then becomes selectable.
-11. For direct comparisons, choose **LoRAs as rows** to place one LoRA's weights next
-    to each other, or **LoRAs as columns** to place them underneath each other. These
-    layouts support at most ten selected items and require identical weight sequences.
-12. Generate normally. Per-item pages are returned first; an enabled combined matrix
-    follows them.
+1. Open and enable **LoRA / Embedding Tester**. In **1. Selection**, choose LoRA or
+   Embedding, then select the folder, tested items, global weights, and optional
+   per-item overrides. The relevant inventory loads on first activation.
+2. In **2. Models & Run Size**, keep **Current model only** for the established
+   workflow or choose a sequential multiple-model mode and its checkpoints. Enable
+   **Extreme Run Mode** only above 500 cells per model or 25 checkpoints.
+3. In **3. Grid**, configure the repeated reference, legend, per-item grids,
+   combined overview, layout, columns, and margin. The reference is enabled by
+   default and repeated on every page.
+4. In **4. Output & Safety**, choose whether to retain individual images and keep
+   the recommended complete model unload enabled for matrix construction.
+5. Check the always-visible **Planned run** line below the tabs. It reports the
+   comparison/reference cells per model, selected model count, total generations,
+   and active Standard or Extreme limits. Invalid or incomplete settings are shown
+   there before generation.
+6. Generate normally. Per-item pages are returned first; an enabled combined matrix
+   follows them.
 
 The comparison-capacity line uses the current Forge width/height, selected-item count,
 legend, margin, and reference settings. It reports a safe maximum image count per item
 and a symmetric `0.5`-step range such as `-5:5:0.5`. Hi-Res output is checked again
 against the actual generated cell size and can split earlier.
 
-Generation is blocked while LoRA Tester is enabled and no LoRA is selected.
-Disabling the accordion leaves normal Forge generation unchanged.
+Generation is blocked when the selected LoRA/Embedding mode is missing its required
+item. Prompt-only multiple-model mode intentionally requires no LoRA. Disabling the
+accordion leaves normal Forge generation unchanged.
+
+### Multiple models
+
+The **2. Models & Run Size** tab is optional. Its default **Current model only** mode
+preserves the existing tester behavior. Two additional modes are available:
+
+- **One LoRA across selected models** requires **LoRA** under **What should be
+  tested?**, exactly one selected LoRA, one shared weight or weight range, and up to
+  25 selected checkpoints. Extreme Run Mode raises the checkpoint limit to 150.
+- **Prompt only across selected models** does not require a LoRA. Internally it uses a
+  no-op comparison case so the same fixed seed, disk spooling, matrix creation, and
+  recovery path are reused without creating or loading an empty LoRA file.
+
+Each selected checkpoint runs as a complete Forge processing job. After its pages are
+persisted, LoRA Tester releases processing references and calls Forge's complete
+checkpoint unload path before starting the next checkpoint. The originally selected
+checkpoint and additional modules are restored in a `finally` path. Completed model
+pages survive a later model failure or interruption, and a recovery manifest records
+the per-model result. If a full unload fails, the sequence stops before another model
+is loaded. After the sequential jobs finish, their labeled per-model pages are combined
+into one shared comparison grid. The normal matrix dimension and pixel limits remain
+active and split that overview only when a single safe page is impossible.
+
+Model-family preflight is deliberately not part of this first implementation. Forge
+therefore remains the authority: an incompatible checkpoint/LoRA combination may fail
+during loading or generation and is reported as a failed model job. KREA and MOSS still
+require focused live validation before this mode is release-qualified.
 
 ### Embedding Test (`v0.3.0-beta`)
 
 1. Choose Forge UI Preset **xl**. This preset covers SDXL, Pony, and Illustrious.
-2. Open and enable **LoRA / Embedding Tester**, then choose **Embedding** as the
-   **Test Type**.
+2. Open and enable **LoRA / Embedding Tester**, then choose **Embedding** under
+   **What should be tested?** in **1. Selection**.
 3. The list is available before the checkpoint is loaded. It scans only Safetensors
    headers for both `clip_l` and `clip_g`; tensor data is not loaded. Click
    **Refresh Compatible Embeddings** after adding files.
@@ -224,24 +253,18 @@ per-iteration random-number generator before every cell so that all LoRA/weight 
 Embedding/weight combinations use the seed of the first generated image. This
 preserves a meaningful visual comparison.
 
-## Adaptive RAM protection (disabled in `v0.3.0-beta`)
+## Memory and page safeguards
 
-The adaptive RAM watchdog is intentionally disabled for the `v0.3.0-beta` prerelease
-while its cross-system thresholds are evaluated further. Its checkbox and budget fields
-are visible but read-only. No RAM-monitor thread is started, and the extension does
-not stop between LoRA cells based on physical-memory or Windows-commit thresholds.
+Every completed cell is written to disk immediately, and large decoded Forge/Pillow
+references are released before the next cells accumulate. Labeled row strips are also
+saved separately before the final pages are composed. Matrix pages are split before
+they exceed 65,000 pixels on either axis or 89,000,000 total pixels.
 
-The implementation remains in the source behind one release switch so it can be
-tested and re-enabled later without reintroducing separate UI and processing paths.
-
-Disk spooling remains active: every completed cell is written to disk immediately.
-The configured matrix column count remains the width of a logical row, and every
-labeled row is saved separately before the final page is composed. The maximum safe
-image-dimension fallback also remains active.
-
-For `v0.3.0-beta`, the primary memory-saving mechanism is the enabled-by-default model
-unload described below. Users should still avoid matrix dimensions that exceed the
-practical RAM and image-size limits of their system.
+The former adaptive physical-RAM/Windows-commit watchdog and its UI have been removed.
+Its thresholds were hardware-specific and it was already disabled in the public beta.
+The enabled-by-default model unload described below remains the primary mechanism for
+freeing model RAM before page composition. Users should still avoid jobs whose
+practical disk, time, or memory requirements exceed their system.
 
 ## Model unloading
 
@@ -336,8 +359,6 @@ returned as recovery output and the recovery location is logged.
 - Preset detection is a capability hint for early UI discovery. The loaded checkpoint
   is always the final authority when generation starts.
 
-- Adaptive RAM protection is visible but intentionally disabled while universal
-  thresholds are evaluated. Disk spooling and optional model unloading remain active.
 - **Matrix Image Margin** controls spacing between matrix rows. Horizontal cell
   spacing currently applies only when **Draw Legend in Matrix Grid** is enabled.
 - When model unloading is enabled, saved matrix grids currently use the Forge grid

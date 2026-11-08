@@ -8,25 +8,19 @@ Allows fixed-seed matrix testing of multiple LoRAs or SDXL-compatible textual
 inversion embeddings with one prompt.
 """
 
+import copy
 import gc
 import html
 import os
 import json
 import shutil
-import threading
 import time
 import uuid
-import weakref
 import gradio as gr
 from decimal import Decimal, InvalidOperation
 from PIL import Image, ImageColor, ImageDraw, PngImagePlugin
 from pathlib import Path
 from typing import Dict
-
-try:
-    import psutil
-except ImportError:
-    psutil = None
 
 from modules import scripts, shared, images
 from modules.ui_components import InputAccordion, FormRow
@@ -38,90 +32,7 @@ from forge_neo_model_family import (
     scan_sdxl_dual_clip_embeddings,
 )
 
-# Import LoRA system
-try:
-    from extensions_builtin.sd_forge_lora import networks
-    LORA_AVAILABLE = True
-except ImportError:
-    try:
-        from modules import extra_networks_lora as networks
-        LORA_AVAILABLE = True
-    except ImportError:
-        LORA_AVAILABLE = False
-        print("[LoRA Tester] Warning: LoRA system not found")
-
-
-GIB = 1024 ** 3
 MIB = 1024 ** 2
-
-
-class RamMonitor:
-    """Record short system-RAM peaks without blocking Forge's generation loop."""
-
-    def __init__(self, interval_seconds=0.1):
-        self.interval_seconds = interval_seconds
-        self._stop_event = threading.Event()
-        self._lock = threading.Lock()
-        self._interval_start = 0
-        self._interval_minimum = 0
-        self._interval_active = False
-        self._thread = None
-
-    @staticmethod
-    def available():
-        if psutil is None:
-            return 0
-        return int(psutil.virtual_memory().available)
-
-    def start(self):
-        if psutil is None or self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._run, name="lora-tester-ram", daemon=True)
-        self._thread.start()
-
-    def _run(self):
-        while not self._stop_event.wait(self.interval_seconds):
-            value = self.available()
-            with self._lock:
-                if self._interval_active and value:
-                    self._interval_minimum = min(self._interval_minimum, value)
-
-    def begin_interval(self):
-        value = self.available()
-        with self._lock:
-            self._interval_start = value
-            self._interval_minimum = value
-            self._interval_active = bool(value)
-        return value
-
-    def end_interval(self, detailed=False):
-        value = self.available()
-        with self._lock:
-            if self._interval_active and value:
-                self._interval_minimum = min(self._interval_minimum, value)
-            start = self._interval_start
-            minimum = self._interval_minimum
-            self._interval_active = False
-
-        total_drop = max(0, start - minimum)
-        persistent_growth = max(0, start - value) if value else 0
-        transient_drop = max(0, value - minimum) if value else 0
-        if detailed:
-            return {
-                'start_bytes': start,
-                'minimum_bytes': minimum,
-                'end_bytes': value,
-                'total_drop_bytes': total_drop,
-                'persistent_growth_bytes': persistent_growth,
-                'transient_drop_bytes': transient_drop,
-            }
-        return total_drop
-
-    def stop(self):
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=1.0)
-            self._thread = None
 
 
 class LoRaMetadataReader:
@@ -375,10 +286,6 @@ class LoRaTesterScript(scripts.Script):
 
     # Keep the accordion near the bottom of Forge's always-on UI section.
     sorting_priority = 1_000_000
-    # Disabled for the v0.1.0 release while the adaptive thresholds are
-    # evaluated further. Keep this as the single reactivation switch so the UI,
-    # background sampler, and generation-stop logic cannot drift apart.
-    RAM_WATCHDOG_ENABLED = False
     PROCESSING_STATE_ATTRIBUTE = "_lora_tester_state"
     MAX_WEIGHTS_PER_ITEM = 100
     MAX_TOTAL_CASES = 500
@@ -398,6 +305,14 @@ class LoRaTesterScript(scripts.Script):
     ROOT_EMBEDDING_FOLDER = "__lora_tester_root_embedding_folder__"
     TEST_TYPE_LORA = "LoRA"
     TEST_TYPE_EMBEDDING = "Embedding"
+    TEST_TYPE_PROMPT = "Prompt only (internal)"
+    MULTI_MODEL_CURRENT = "Current model only (existing behavior)"
+    MULTI_MODEL_LORA = "One LoRA across selected models"
+    MULTI_MODEL_PROMPT = "Prompt only across selected models"
+    MAX_MULTI_MODEL_CHECKPOINTS = 25
+    MAX_EXTREME_MULTI_MODEL_CHECKPOINTS = 150
+    PROMPT_ONLY_SENTINEL = "__lora_tester_prompt_only__"
+    BATCH_MODEL_LABEL_ATTRIBUTE = "_lora_tester_batch_model_label"
     MATRIX_LAYOUT_STANDARD = "Standard order"
     MATRIX_LAYOUT_COMPARE_HORIZONTAL = "Compare: LoRAs as rows"
     MATRIX_LAYOUT_COMPARE_VERTICAL = "Compare: LoRAs as columns"
@@ -420,6 +335,80 @@ class LoRaTesterScript(scripts.Script):
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
+
+    @classmethod
+    def _multi_model_request_error(
+        cls,
+        mode,
+        checkpoint_selection,
+        test_type,
+        lora_selection,
+        extreme_run_mode=False,
+    ):
+        """Validate only the explicit first-stage multi-model contract."""
+
+        if mode == cls.MULTI_MODEL_CURRENT:
+            return None
+        if mode not in {cls.MULTI_MODEL_LORA, cls.MULTI_MODEL_PROMPT}:
+            return "Unknown multiple-model mode. Select a supported mode and try again."
+
+        checkpoints = list(checkpoint_selection or [])
+        if not checkpoints:
+            return "Select at least one checkpoint for the multiple-model run."
+        checkpoint_limit = (
+            cls.MAX_EXTREME_MULTI_MODEL_CHECKPOINTS
+            if extreme_run_mode
+            else cls.MAX_MULTI_MODEL_CHECKPOINTS
+        )
+        if len(checkpoints) > checkpoint_limit:
+            extreme_hint = (
+                ""
+                if extreme_run_mode
+                else (
+                    " Enable Extreme Run Mode for up to "
+                    f"{cls.MAX_EXTREME_MULTI_MODEL_CHECKPOINTS} checkpoints."
+                )
+            )
+            return (
+                "Multiple-model runs currently support at most "
+                f"{checkpoint_limit} checkpoints.{extreme_hint}"
+            )
+
+        if mode == cls.MULTI_MODEL_LORA:
+            if test_type != cls.TEST_TYPE_LORA:
+                return (
+                    "One-LoRA/multiple-model mode requires LoRA under "
+                    "'What should be tested?'. Switch the selection or choose "
+                    "Prompt-only mode."
+                )
+            selected_loras = list(lora_selection or [])
+            if len(selected_loras) != 1:
+                return (
+                    "One-LoRA/multiple-model mode requires exactly one selected LoRA."
+                )
+        return None
+
+    @classmethod
+    def _prepare_multi_model_job_arguments(cls, arguments, mode):
+        """Disable the outer runner while preserving the normal inner tester path."""
+
+        job_arguments = list(arguments)
+        if len(job_arguments) < 23:
+            raise ValueError("Incomplete LoRA Tester script arguments for model job")
+
+        # The two multi-model components are deliberately appended to the stable
+        # existing callback contract. Disable them in the nested processing job so
+        # that the unchanged single-model tester executes exactly once.
+        job_arguments[-2] = cls.MULTI_MODEL_CURRENT
+        job_arguments[-1] = []
+
+        if mode == cls.MULTI_MODEL_PROMPT:
+            job_arguments[1] = cls.TEST_TYPE_PROMPT
+            job_arguments[2] = [cls.PROMPT_ONLY_SENTINEL]
+            # A prompt-only job is itself the no-op comparison cell. Generating the
+            # ordinary reference as well would create the same image twice.
+            job_arguments[11] = False
+        return job_arguments
 
     @staticmethod
     def _coerce_settings_rows(settings):
@@ -561,7 +550,7 @@ class LoRaTesterScript(scripts.Script):
         )
 
     @classmethod
-    def _parse_weight_spec(cls, spec, description):
+    def _parse_weight_spec(cls, spec, description, report_errors=True):
         """Parse either one weight or an inclusive start:end:step range."""
         text = "" if spec is None else str(spec).strip()
         if not text:
@@ -570,25 +559,35 @@ class LoRaTesterScript(scripts.Script):
         try:
             parts = [Decimal(part.strip()) for part in text.split(':')]
         except (InvalidOperation, ValueError):
-            print(f"[LoRA Tester] Invalid {description} weight specification: {text!r}")
+            if report_errors:
+                print(
+                    f"[LoRA Tester] Invalid {description} weight specification: {text!r}"
+                )
             return None
 
         if not all(value.is_finite() for value in parts):
-            print(f"[LoRA Tester] Non-finite {description} weight specification: {text!r}")
+            if report_errors:
+                print(
+                    f"[LoRA Tester] Non-finite {description} weight specification: {text!r}"
+                )
             return None
 
         if len(parts) == 1:
             return [float(parts[0])]
         if len(parts) != 3:
-            print(
-                f"[LoRA Tester] Invalid {description} weight specification: {text!r}. "
-                "Use a number or start:end:step."
-            )
+            if report_errors:
+                print(
+                    f"[LoRA Tester] Invalid {description} weight specification: {text!r}. "
+                    "Use a number or start:end:step."
+                )
             return None
 
         start, end, step = parts
         if step == 0:
-            print(f"[LoRA Tester] Invalid {description} weight range: step must not be zero")
+            if report_errors:
+                print(
+                    f"[LoRA Tester] Invalid {description} weight range: step must not be zero"
+                )
             return None
 
         direction = Decimal(1) if end >= start else Decimal(-1)
@@ -602,10 +601,11 @@ class LoRaTesterScript(scripts.Script):
             current += step
 
         if in_range(current):
-            print(
-                f"[LoRA Tester] {description} weight range contains more than "
-                f"{cls.MAX_WEIGHTS_PER_ITEM} values and was rejected"
-            )
+            if report_errors:
+                print(
+                    f"[LoRA Tester] {description} weight range contains more than "
+                    f"{cls.MAX_WEIGHTS_PER_ITEM} values and was rejected"
+                )
             return None
 
         return values
@@ -628,6 +628,151 @@ class LoRaTesterScript(scripts.Script):
         return per_item_grids, (
             bool(combined_overview) if per_item_grids else True
         )
+
+    @classmethod
+    def _run_summary_html(
+        cls,
+        test_type,
+        selected_loras,
+        global_lora_weights,
+        lora_settings,
+        selected_embeddings,
+        global_embedding_weights,
+        embedding_settings,
+        include_reference,
+        multi_model_mode,
+        selected_checkpoints,
+        extreme_run_mode,
+    ):
+        """Describe the planned run without mutating or validating Forge state."""
+
+        mode = multi_model_mode or cls.MULTI_MODEL_CURRENT
+        checkpoints = list(selected_checkpoints or [])
+        model_count = 1 if mode == cls.MULTI_MODEL_CURRENT else len(checkpoints)
+        case_limit = cls._maximum_total_cases(extreme_run_mode)
+        model_limit = (
+            cls.MAX_EXTREME_MULTI_MODEL_CHECKPOINTS
+            if extreme_run_mode
+            else cls.MAX_MULTI_MODEL_CHECKPOINTS
+        )
+        limit_label = "Extreme" if extreme_run_mode else "Standard"
+
+        def summary(message, warning=False):
+            classes = "lora-tester-run-summary"
+            if warning:
+                classes += " lora-tester-run-summary-warning"
+            return f"<div class='{classes}'>{message}</div>"
+
+        if mode != cls.MULTI_MODEL_CURRENT and not checkpoints:
+            return summary(
+                "<b>Planned run:</b> Select at least one checkpoint in "
+                "<b>2. Models &amp; Run Size</b>.",
+                warning=True,
+            )
+
+        if mode == cls.MULTI_MODEL_PROMPT:
+            over_limit = model_count > model_limit
+            message = (
+                f"<b>Planned run:</b> Prompt only &middot; {model_count} model(s) "
+                f"= <b>{model_count} generation(s)</b> &middot; {limit_label} limit: "
+                f"{model_limit} models"
+            )
+            if over_limit:
+                message += " &middot; <b>Reduce the model selection</b>"
+            return summary(message, warning=over_limit)
+
+        embedding_mode = test_type == cls.TEST_TYPE_EMBEDDING
+        selected_items = list(
+            (selected_embeddings if embedding_mode else selected_loras) or []
+        )
+        item_name = "Embedding" if embedding_mode else "LoRA"
+        if not selected_items:
+            return summary(
+                f"<b>Planned run:</b> Select at least one {item_name} in "
+                "<b>1. Selection</b>.",
+                warning=True,
+            )
+        if mode == cls.MULTI_MODEL_LORA and (
+            embedding_mode or len(selected_items) != 1
+        ):
+            return summary(
+                "<b>Planned run:</b> Multiple-model LoRA mode requires exactly one "
+                "selected LoRA.",
+                warning=True,
+            )
+
+        global_spec = (
+            global_embedding_weights if embedding_mode else global_lora_weights
+        )
+        global_text = cls._cell_text(global_spec)
+        global_weights = (
+            cls._parse_weight_spec(global_text, "global", report_errors=False)
+            if global_text
+            else [1.0]
+        )
+        if global_weights is None:
+            return summary(
+                "<b>Planned run:</b> Correct the global weight specification in "
+                "<b>1. Selection</b>.",
+                warning=True,
+            )
+
+        if embedding_mode:
+            settings = {
+                str(row[0]): row
+                for row in cls._coerce_embedding_settings_rows(embedding_settings)
+                if row[0] not in (None, "")
+            }
+            weight_offset = 3
+        else:
+            settings = {
+                str(row[0]): row
+                for row in cls._coerce_settings_rows(lora_settings)
+                if row[0] not in (None, "")
+            }
+            weight_offset = 2
+
+        comparison_cells = 0
+        for item in selected_items:
+            weights, weight_error = cls._resolve_item_weights(
+                settings.get(str(item)),
+                weight_offset,
+                global_weights,
+                str(item),
+                report_errors=False,
+            )
+            if weight_error:
+                return summary(
+                    f"<b>Planned run:</b> Correct the incomplete or invalid per-{item_name} "
+                    "weight settings in <b>1. Selection</b>.",
+                    warning=True,
+                )
+            comparison_cells += len(weights)
+
+        reference_cells = 1 if include_reference else 0
+        cells_per_model = comparison_cells + reference_cells
+        total_generations = cells_per_model * model_count
+        over_case_limit = cells_per_model > case_limit
+        over_model_limit = mode != cls.MULTI_MODEL_CURRENT and model_count > model_limit
+        reference_text = (
+            " + 1 reference" if reference_cells else " &middot; reference disabled"
+        )
+        model_text = (
+            "current model"
+            if mode == cls.MULTI_MODEL_CURRENT
+            else f"{model_count} models"
+        )
+        message = (
+            f"<b>Planned run:</b> {len(selected_items)} {item_name}(s) &middot; "
+            f"{comparison_cells} comparison cell(s){reference_text} &middot; {model_text} "
+            f"= <b>{total_generations} generation(s)</b> &middot; {limit_label} limits: "
+            f"{case_limit:,} cells/model"
+        )
+        if mode != cls.MULTI_MODEL_CURRENT:
+            message += f", {model_limit} models"
+        if over_case_limit or over_model_limit:
+            message += " &middot; <b>Reduce the run or change Extreme Run Mode</b>"
+        return summary(message, warning=over_case_limit or over_model_limit)
 
     @classmethod
     def _comparison_capacity_visible(
@@ -817,7 +962,14 @@ class LoRaTesterScript(scripts.Script):
         )
 
     @classmethod
-    def _resolve_item_weights(cls, settings_row, weight_offset, global_weights, item):
+    def _resolve_item_weights(
+        cls,
+        settings_row,
+        weight_offset,
+        global_weights,
+        item,
+        report_errors=True,
+    ):
         """Resolve one optional Min/Max/Step override without silent fallback."""
 
         if settings_row is None:
@@ -829,7 +981,11 @@ class LoRaTesterScript(scripts.Script):
         if not minimum and not maximum and not step:
             return global_weights, None
         if minimum and not maximum and not step:
-            weights = cls._parse_weight_spec(minimum, item)
+            weights = cls._parse_weight_spec(
+                minimum,
+                item,
+                report_errors=report_errors,
+            )
             if weights is None:
                 return None, (
                     f"The individual weight for '{item}' is invalid. Enter one "
@@ -839,7 +995,9 @@ class LoRaTesterScript(scripts.Script):
             return weights, None
         if minimum and maximum and step:
             weights = cls._parse_weight_spec(
-                f"{minimum}:{maximum}:{step}", item
+                f"{minimum}:{maximum}:{step}",
+                item,
+                report_errors=report_errors,
             )
             if weights is None:
                 return None, (
@@ -877,8 +1035,6 @@ class LoRaTesterScript(scripts.Script):
             )
         if interrupted:
             return False, "generation was interrupted"
-        if state.get('ram_stop_reason'):
-            return False, str(state['ram_stop_reason'])
         return True, None
 
     def _build_lora_settings_rows(self, selected_loras, current_settings=None):
@@ -1096,6 +1252,42 @@ class LoRaTesterScript(scripts.Script):
         return sorted(choices, key=folder_order)
 
     @staticmethod
+    def _checkpoint_choices(refresh=False):
+        """Return stable Forge checkpoint aliases without loading any model."""
+
+        from modules import sd_models
+
+        if refresh:
+            sd_models.list_models()
+        checkpoint_infos = sorted(
+            sd_models.checkpoints_list.values(),
+            key=lambda info: str(info.title).casefold(),
+        )
+        return [(info.title, info.name) for info in checkpoint_infos]
+
+    @staticmethod
+    def _resolve_checkpoint_jobs(checkpoint_selection):
+        """Resolve UI aliases to Forge-owned checkpoint records at run time."""
+
+        from modules import sd_models
+
+        jobs = []
+        missing = []
+        for selected in checkpoint_selection or []:
+            checkpoint_info = sd_models.get_closet_checkpoint_match(str(selected))
+            if checkpoint_info is None:
+                missing.append(str(selected))
+                continue
+            jobs.append(
+                {
+                    "checkpoint": checkpoint_info.name,
+                    "title": checkpoint_info.title,
+                    "label": checkpoint_info.name_for_extra,
+                }
+            )
+        return jobs, missing
+
+    @staticmethod
     def _ensure_temp_directory():
         """Recreate Forge's configured gallery cache directory when missing."""
         temp_dir = getattr(shared.opts, 'temp_dir', "")
@@ -1108,85 +1300,56 @@ class LoRaTesterScript(scripts.Script):
             print(f"[LoRA Tester] Could not create temporary directory {temp_dir!r}: {error}")
 
     @staticmethod
-    def _memory_snapshot():
-        if psutil is None:
-            return 0, 0
-        memory = psutil.virtual_memory()
-        return int(memory.total), int(memory.available)
+    def _release_processing_references(p):
+        """Drop per-job sampler and conditioning references before model unload."""
+
+        if p is None:
+            return
+        try:
+            p.close()
+        finally:
+            p.clear_prompt_cache()
+
+        p.c = None
+        p.uc = None
+        p.sampler = None
+        p.rng = None
+        p.modified_noise = None
+        if hasattr(p, 'hr_c'):
+            p.hr_c = None
+        if hasattr(p, 'hr_uc'):
+            p.hr_uc = None
+        for cache_name in ('cached_hr_c', 'cached_hr_uc'):
+            if hasattr(type(p), cache_name):
+                setattr(type(p), cache_name, [None, None, None])
 
     @staticmethod
-    def _windows_commit_snapshot():
-        """Return the current Windows commit limit/headroom, or zeros elsewhere."""
-        if os.name != "nt":
-            return 0, 0
+    def _clear_loaded_lora_registry():
+        """Resolve Forge's LoRA registry lazily, only when cleanup needs it."""
 
         try:
-            import ctypes
-            from ctypes import wintypes
+            from extensions_builtin.sd_forge_lora import networks
+        except ImportError:
+            try:
+                from modules import extra_networks_lora as networks
+            except ImportError:
+                return
 
-            class MemoryStatusEx(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", wintypes.DWORD),
-                    ("dwMemoryLoad", wintypes.DWORD),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
-
-            status = MemoryStatusEx()
-            status.dwLength = ctypes.sizeof(status)
-            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return 0, 0
-            return int(status.ullTotalPageFile), int(status.ullAvailPageFile)
-        except (AttributeError, OSError, ValueError):
-            return 0, 0
+        loaded_networks = getattr(networks, 'loaded_networks', None)
+        if loaded_networks is not None:
+            loaded_networks.clear()
 
     @classmethod
-    def _resolve_ram_settings(cls, budget_choice, custom_budget_gb, minimum_free_gb):
-        actual_total, _ = cls._memory_snapshot()
-        configured_total = actual_total
+    def _full_forge_model_unload(cls, p=None):
+        """Use Forge's complete checkpoint unload, not a VRAM-only eviction."""
 
-        choice = str(budget_choice or "Automatic")
-        if choice == "Custom":
-            try:
-                configured_total = int(float(custom_budget_gb) * GIB)
-            except (TypeError, ValueError):
-                configured_total = actual_total
-        elif choice != "Automatic":
-            try:
-                configured_total = int(float(choice.split()[0]) * GIB)
-            except (TypeError, ValueError):
-                configured_total = actual_total
+        cls._release_processing_references(p)
+        from modules import devices, sd_models
 
-        if actual_total:
-            configured_total = max(GIB, min(configured_total or actual_total, actual_total))
-        else:
-            configured_total = max(GIB, configured_total or 64 * GIB)
-
-        try:
-            minimum_free = int(float(minimum_free_gb) * GIB)
-        except (TypeError, ValueError):
-            minimum_free = 0
-        if minimum_free <= 0:
-            minimum_free = max(4 * GIB, int(configured_total * 0.08))
-
-        return {
-            'configured_total_bytes': configured_total,
-            'minimum_free_bytes': minimum_free,
-        }
-
-    @staticmethod
-    def _effective_available(state):
-        actual_total, actual_available = LoRaTesterScript._memory_snapshot()
-        if not actual_available:
-            return 0
-        configured_total = state.get('configured_total_bytes') or actual_total
-        reserved_outside_budget = max(0, actual_total - configured_total)
-        return max(0, actual_available - reserved_outside_budget)
+        sd_models.unload_model_weights()
+        cls._clear_loaded_lora_registry()
+        gc.collect()
+        devices.torch_gc()
 
     @classmethod
     def _unload_forge_model_for_matrix(cls, p, state):
@@ -1196,7 +1359,6 @@ class LoRaTesterScript(scripts.Script):
             return
 
         state['model_unload_attempted'] = True
-        available_before = cls._effective_available(state)
         print(
             "[LoRA Tester] Unloading checkpoint, text encoder and VAE "
             "before matrix construction"
@@ -1208,52 +1370,21 @@ class LoRaTesterScript(scripts.Script):
             # and sampler references cannot keep model components alive while the
             # matrix canvases are allocated. clear_prompt_cache() is intentional
             # even when Forge's persistent conditioning cache is enabled.
-            try:
-                p.close()
-            finally:
-                p.clear_prompt_cache()
-
-            p.c = None
-            p.uc = None
-            p.sampler = None
-            p.rng = None
-            p.modified_noise = None
-            if hasattr(p, 'hr_c'):
-                p.hr_c = None
-            if hasattr(p, 'hr_uc'):
-                p.hr_uc = None
-            for cache_name in ('cached_hr_c', 'cached_hr_uc'):
-                if hasattr(type(p), cache_name):
-                    setattr(type(p), cache_name, [None, None, None])
-
             # unload_all_models() alone primarily evicts GPU allocations and may
             # offload weights into system RAM. Forge's public checkpoint-unload
             # path also drops the global diffusion engine, which owns the UNet,
             # text encoder and VAE, and clears forge_hash so the next generation
             # reloads the selected checkpoint normally.
-            from modules import devices, sd_models
-
-            sd_models.unload_model_weights()
-            if LORA_AVAILABLE and hasattr(networks, 'loaded_networks'):
-                networks.loaded_networks.clear()
-            gc.collect()
-            devices.torch_gc()
+            cls._full_forge_model_unload(p)
 
             state['model_unloaded'] = True
-            available_after = cls._effective_available(state)
-            state['available_after_model_unload_bytes'] = available_after
-            released = max(0, available_after - available_before)
-            print(
-                f"[LoRA Tester] Model unload complete: "
-                f"{available_after / GIB:.1f} GB effective RAM available "
-                f"(+{released / GIB:.1f} GB observed)"
-            )
+            print("[LoRA Tester] Model unload complete")
             cls._write_manifest(state, "model-unloaded")
         except Exception as error:
             state['model_unload_error'] = str(error)
             print(
                 f"[LoRA Tester] Warning: model unload failed; "
-                f"matrix construction will continue with RAM safeguards: {error}"
+                f"matrix construction will continue with static page limits: {error}"
             )
             cls._write_manifest(state, "model-unload-failed")
 
@@ -1451,20 +1582,6 @@ class LoRaTesterScript(scripts.Script):
             'fixed_seed': state.get('fixed_seed'),
             'cells': cells,
             'rows': state.get('rows', []),
-            'ram_calibrated': state.get('ram_calibrated', False),
-            'calibrated_available_bytes': state.get('calibrated_available_bytes', 0),
-            'calibrated_commit_available_bytes': state.get(
-                'calibrated_commit_available_bytes', 0
-            ),
-            'observed_peak_bytes': state.get('observed_peak_bytes', 0),
-            'observed_transient_peak_bytes': state.get(
-                'observed_transient_peak_bytes', 0
-            ),
-            'observed_persistent_growth_bytes': state.get(
-                'observed_persistent_growth_bytes', 0
-            ),
-            'last_generation_memory': state.get('last_generation_memory'),
-            'ram_stop_reason': state.get('ram_stop_reason'),
             'output_retention': state.get('output_retention'),
             'create_per_item_grids': state.get('create_per_item_grids', False),
             'create_combined_overview': state.get('create_combined_overview', True),
@@ -1495,10 +1612,23 @@ class LoRaTesterScript(scripts.Script):
             'model_unload_attempted': state.get('model_unload_attempted', False),
             'model_unloaded': state.get('model_unloaded', False),
             'model_unload_error': state.get('model_unload_error'),
-            'available_after_model_unload_bytes': state.get(
-                'available_after_model_unload_bytes',
-                0,
+            'multi_model': state.get('multi_model', False),
+            'multi_model_mode': state.get('multi_model_mode'),
+            'model_jobs': state.get('model_jobs', []),
+            'model_results': state.get('model_results', []),
+            'original_checkpoint': state.get('original_checkpoint'),
+            'original_model_restored': state.get(
+                'original_model_restored',
+                False,
             ),
+            'original_model_restore_error': state.get(
+                'original_model_restore_error'
+            ),
+            'multi_model_overview_pages': state.get(
+                'multi_model_overview_pages',
+                [],
+            ),
+            'multi_model_overview_error': state.get('multi_model_overview_error'),
         }
         manifest_path = Path(manifest_path)
         temporary = manifest_path.with_name(manifest_path.name + ".tmp")
@@ -1556,421 +1686,402 @@ class LoRaTesterScript(scripts.Script):
         """Create the UI for LoRA Tester"""
 
         with InputAccordion(False, label="LoRA / Embedding Tester", elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester") as lora_tester_enabled:
-            test_type = gr.Radio(
-                choices=[self.TEST_TYPE_LORA, self.TEST_TYPE_EMBEDDING],
-                value=self.TEST_TYPE_LORA,
-                label="Test Type",
-                info=(
-                    "Embedding Test currently supports SDXL, Pony, and Illustrious "
-                    "checkpoints with dual-encoder SDXL embeddings."
-                ),
-                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_type",
-            )
-
-            with gr.Group(visible=True) as lora_controls:
-                with FormRow():
-                    refresh_loras_btn = gr.Button(
-                        "Refresh LoRA List", variant="secondary", size="sm"
-                    )
-
-                with FormRow():
-                    lora_folder = gr.Dropdown(
-                        choices=[("Manual selection (all folders)", self.ALL_LORA_FOLDERS)],
-                        value=self.ALL_LORA_FOLDERS,
-                        label="LoRA Folder",
+            with gr.Tabs(
+                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_tabs"
+            ):
+                with gr.Tab("1. Selection"):
+                    test_type = gr.Radio(
+                        choices=[self.TEST_TYPE_LORA, self.TEST_TYPE_EMBEDDING],
+                        value=self.TEST_TYPE_LORA,
+                        label="What should be tested?",
                         info=(
-                            "Selecting a specific folder loads all LoRAs in that scope into "
-                            "the selection and per-LoRA table. Manual selection shows all LoRAs "
-                            "but only tests those selected explicitly."
+                            "Embedding Test currently supports SDXL, Pony, and "
+                            "Illustrious checkpoints with dual-encoder SDXL embeddings."
                         ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_folder"
-                    )
-                    include_subfolders = gr.Checkbox(
-                        value=True,
-                        label="Include subfolders",
-                        info="Also include LoRAs stored below the selected folder.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_include_subfolders"
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_type",
                     )
 
-                with FormRow():
-                    lora_selection = gr.Dropdown(
-                        choices=[],
-                        multiselect=True,
-                        label="Select LoRAs to Test",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_selection",
-                        info="Select one or more LoRAs to test with the current prompt"
-                    )
-
-                with FormRow():
-                    global_weight_spec = gr.Textbox(
-                        value="1.0",
-                        label="Global LoRA Weight(s)",
-                        placeholder="1.0 or -3:3:0.5",
-                        info="Use one value or an inclusive start:end:step range. Per-LoRA overrides are available below.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_weights"
-                    )
-
-                with gr.Accordion("Per-LoRA Settings", open=True):
-                    with FormRow():
-                        use_trigger_words = gr.Checkbox(
-                            value=True,
-                            label="Insert Trigger Words",
-                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_use_triggers"
+                    with gr.Group(visible=True) as lora_controls:
+                        with FormRow():
+                            refresh_loras_btn = gr.Button(
+                                "Refresh LoRA List", variant="secondary", size="sm"
+                            )
+                        with FormRow():
+                            lora_folder = gr.Dropdown(
+                                choices=[(
+                                    "Manual selection (all folders)",
+                                    self.ALL_LORA_FOLDERS,
+                                )],
+                                value=self.ALL_LORA_FOLDERS,
+                                label="LoRA Folder",
+                                info=(
+                                    "A folder selection loads every LoRA in that scope. "
+                                    "Manual selection tests only explicitly selected LoRAs."
+                                ),
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_folder",
+                            )
+                            include_subfolders = gr.Checkbox(
+                                value=True,
+                                label="Include subfolders",
+                                info="Also include LoRAs below the selected folder.",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_include_subfolders",
+                            )
+                        lora_selection = gr.Dropdown(
+                            choices=[],
+                            multiselect=True,
+                            label="Select LoRAs to Test",
+                            info="Select one or more LoRAs to test with the current prompt.",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_selection",
                         )
-                        trigger_position = gr.Radio(
-                            choices=["Start", "End"],
-                            value="Start",
-                            label="Trigger Word Position",
-                            info="Start = before the prompt. End = after the LoRA tag.",
-                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_trigger_pos"
-                        )
-
-                    gr.HTML(
-                        value=(
-                            "<p style='color: #888; font-size: 0.9em;'>"
-                            "Examples: <code>0.8 | blank | blank</code> = one dedicated weight; "
-                            "<code>-1 | 1 | 0.25</code> = range from -1 to 1. "
-                            "Leave Min, Max, and Step blank to use the global setting. "
-                            "A blank trigger cell uses metadata; enter <code>&lt;none&gt;</code> "
-                            "to explicitly disable triggers for one LoRA.</p>"
-                        )
-                    )
-
-                    lora_settings = gr.Dataframe(
-                        value=[],
-                        headers=[
-                            "LoRA (do not edit)",
-                            "Trigger words (comma-separated)",
-                            "Min / single weight",
-                            "Max",
-                            "Step",
-                        ],
-                        datatype=["str", "str", "str", "str", "str"],
-                        type="array",
-                        row_count=(0, "dynamic"),
-                        col_count=(5, "fixed"),
-                        interactive=True,
-                        visible=False,
-                        wrap=True,
-                        height=300,
-                        column_widths=["30%", "34%", "14%", "11%", "11%"],
-                        label="Selected LoRA Settings",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_settings"
-                    )
-
-            with gr.Group(visible=False) as embedding_controls:
-                preset_bridge = gr.Textbox(
-                    value=resolve_forge_preset(forge_options=shared.opts),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_bridge",
-                    elem_classes=["lora-tester-preset-bridge"],
-                )
-                preset_refresh_bridge = gr.Button(
-                    "Sync Forge preset",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_refresh",
-                    elem_classes=["lora-tester-preset-bridge"],
-                )
-                with FormRow():
-                    refresh_embeddings_btn = gr.Button(
-                        "Refresh Compatible Embeddings", variant="secondary", size="sm"
-                    )
-
-                embedding_status = gr.HTML(
-                    value=(
-                        "<p style='color: #888; font-size: 0.9em;'>"
-                        "Choose Forge UI Preset <code>xl</code> to discover compatible "
-                        "Safetensors embeddings before loading a checkpoint.</p>"
-                    )
-                )
-
-                with FormRow():
-                    embedding_folder = gr.Dropdown(
-                        choices=[(
-                            "Manual selection (all folders)",
-                            self.ALL_EMBEDDING_FOLDERS,
-                        )],
-                        value=self.ALL_EMBEDDING_FOLDERS,
-                        label="Embedding Folder",
-                        info=(
-                            "Before model load, Safetensors headers are filtered for "
-                            "clip_l + clip_g. The loaded checkpoint validates them at runtime."
-                        ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_folder",
-                    )
-                    include_embedding_subfolders = gr.Checkbox(
-                        value=True,
-                        label="Include subfolders",
-                        info="Also include compatible embeddings below the selected folder.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_subfolders",
-                    )
-
-                embedding_selection = gr.Dropdown(
-                    choices=[],
-                    multiselect=True,
-                    label="Select Embeddings to Test",
-                    info="Select one or more compatible textual inversion embeddings.",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_selection",
-                )
-
-                with FormRow():
-                    global_embedding_weight_spec = gr.Textbox(
-                        value="1.0",
-                        label="Global Embedding Weight(s)",
-                        placeholder="1.0 or 0.5:1.5:0.25",
-                        info=(
-                            "Weights use Forge prompt attention. Per-embedding overrides "
-                            "are available below."
-                        ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_weights",
-                    )
-                    embedding_position = gr.Radio(
-                        choices=["Start", "End"],
-                        value="Start",
-                        label="Embedding Position",
-                        info="Insert the weighted embedding before or after the existing prompt.",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_position",
-                    )
-                with gr.Accordion("Per-Embedding Settings", open=True):
-                    gr.HTML(
-                        value=(
-                            "<p style='color: #888; font-size: 0.9em;'>"
-                            "Trigger words come from JSON metadata, with the filename as "
-                            "fallback. Edit comma-separated triggers or enter "
-                            "<code>&lt;none&gt;</code> to suppress the additional trigger. "
-                            "Set Negative prompt? to <code>0</code> for positive or "
-                            "<code>1</code> for negative injection. "
-                            "Use Min alone for one weight, fill Min/Max/Step for a range, "
-                            "or leave all three weight cells blank for the global setting.</p>"
-                        )
-                    )
-                    embedding_settings = gr.Dataframe(
-                        value=[],
-                        headers=[
-                            "Embedding (do not edit)",
-                            "Trigger words (comma-separated)",
-                            "Negative prompt? (0 = Positive, 1 = Negative)",
-                            "Min / single weight",
-                            "Max",
-                            "Step",
-                        ],
-                        datatype=["str", "str", "str", "str", "str", "str"],
-                        type="array",
-                        row_count=(0, "dynamic"),
-                        col_count=(6, "fixed"),
-                        interactive=True,
-                        visible=False,
-                        wrap=True,
-                        height=300,
-                        column_widths=["25%", "28%", "19%", "11%", "9%", "8%"],
-                        label="Selected Embedding Settings",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_settings",
-                    )
-
-            with gr.Accordion("Advanced Options", open=False):
-                with FormRow():
-                    save_original = gr.Checkbox(
-                        value=True,
-                        label="Generate reference image without tested item (Recommended)",
-                        info=(
-                            "The fixed-seed reference is repeated at the top of every "
-                            "matrix page for direct comparison."
-                        ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_baseline"
-                    )
-
-                    draw_legend = gr.Checkbox(
-                        value=True,
-                        label="Draw legend in matrix grid (names, weights, and triggers)",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_draw_legend"
-                    )
-
-                per_item_grids = gr.Checkbox(
-                    value=False,
-                    label="Create one grid per tested LoRA or Embedding",
-                    info=(
-                        "Disabled keeps the former output: one combined matrix plus "
-                        "the selected individual-image retention mode."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_per_item_grids",
-                )
-
-                combined_overview = gr.Checkbox(
-                    value=True,
-                    interactive=False,
-                    label="Also create the combined overview",
-                    info=(
-                        "This choice becomes available when per-item grids are enabled. "
-                        "Without per-item grids the combined matrix is the required "
-                        "primary output."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_combined_overview",
-                )
-
-                comparison_width_bridge = gr.Number(
-                    value=1024,
-                    precision=0,
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_width",
-                    elem_classes=["lora-tester-layout-bridge"],
-                )
-                comparison_height_bridge = gr.Number(
-                    value=1024,
-                    precision=0,
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_height",
-                    elem_classes=["lora-tester-layout-bridge"],
-                )
-                comparison_refresh_bridge = gr.Button(
-                    "Refresh comparison capacity",
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_refresh",
-                    elem_classes=["lora-tester-layout-bridge"],
-                )
-                comparison_capacity = gr.HTML(
-                    value=self._comparison_capacity_html(
-                        self.TEST_TYPE_LORA,
-                        [],
-                        [],
-                        1024,
-                        1024,
-                        5,
-                        True,
-                        True,
-                    ),
-                    visible=False,
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_capacity",
-                )
-                comparison_layout = gr.Radio(
-                    choices=[
-                        self.MATRIX_LAYOUT_STANDARD,
-                        self.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
-                        self.MATRIX_LAYOUT_COMPARE_VERTICAL,
-                    ],
-                    value=self.MATRIX_LAYOUT_STANDARD,
-                    label="Combined matrix layout",
-                    info=(
-                        "Rows keeps every item's weights together horizontally. "
-                        "Columns keeps every item's weights together vertically. "
-                        "Comparison layouts require identical weights for every item "
-                        "and support at most 10 items."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_layout",
-                )
-
-                extreme_run_mode = gr.Checkbox(
-                    value=False,
-                    label="Extreme Run Mode (up to 10,000 matrix cells)",
-                    info=(
-                        "CAUTION: Extreme runs can take many hours or days and may use "
-                        "very large amounts of disk space. Forge, driver, model, extension, "
-                        "or system instability cannot be ruled out during very long runs."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_extreme_run"
-                )
-
-                with FormRow():
-                    matrix_cols = gr.Slider(
-                        minimum=1,
-                        maximum=10,
-                        step=1,
-                        value=3,
-                        label="Standard combined matrix columns",
-                        info=(
-                            "Used only by the Standard order combined overview. "
-                            "Per-item grids always keep one item's weights in a "
-                            "horizontal row and split only at a safety limit."
-                        ),
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_cols"
-                    )
-
-                    matrix_margin = gr.Slider(
-                        minimum=0,
-                        maximum=50,
-                        step=1,
-                        value=5,
-                        label="Matrix Image Margin (px)",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_margin"
-                    )
-
-                output_retention = gr.Radio(
-                    choices=[
-                        self.KEEP_INDIVIDUAL_OUTPUT,
-                        self.MATRIX_ONLY_OUTPUT,
-                    ],
-                    value=self.KEEP_INDIVIDUAL_OUTPUT,
-                    label="Output retention",
-                    info=(
-                        "CAUTION: Matrix-only mode permanently deletes all individual "
-                        "comparison images, but only after every matrix page has been "
-                        "created successfully. If matrix creation fails, the individual "
-                        "images are kept for recovery."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_output_retention"
-                )
-
-                unload_models_before_matrix = gr.Checkbox(
-                    value=True,
-                    label="Unload checkpoint, text encoder and VAE before building the matrix",
-                    info=(
-                        "Frees Forge's model RAM/VRAM for larger matrix pages. "
-                        "The selected checkpoint is reloaded automatically for the next generation."
-                    ),
-                    elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_unload_models"
-                )
-
-                with gr.Accordion("Adaptive RAM Protection", open=True):
-                    gr.HTML(
-                        value=(
-                            "<p style='color: #d99a35; font-size: 0.9em;'>"
-                            "Temporarily disabled for the v0.1.0 release while the RAM thresholds "
-                            "are evaluated further. Disk spooling and the checkpoint/text encoder/VAE "
-                            "unload before matrix creation remain active.</p>"
-                        )
-                    )
-
-                    adaptive_ram = gr.Checkbox(
-                        value=False,
-                        interactive=False,
-                        label="Enable adaptive RAM protection (disabled in v0.1.0)",
-                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_adaptive_ram"
-                    )
-
-                    with FormRow():
-                        ram_budget = gr.Dropdown(
-                            choices=["Automatic", "16 GB", "32 GB", "64 GB", "92 GB", "128 GB", "Custom"],
-                            value="Automatic",
-                            label="RAM Budget",
-                            info="Automatic uses detected physical RAM. A smaller budget reserves RAM for other applications.",
-                            interactive=False,
-                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_ram_budget"
-                        )
-
-                        custom_ram_gb = gr.Number(
-                            value=64,
-                            minimum=1,
-                            precision=1,
-                            label="Custom Budget (GB)",
-                            info="Used only when RAM Budget is Custom.",
-                            interactive=False,
-                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_custom_ram"
-                        )
-
-                        minimum_free_ram_gb = gr.Number(
-                            value=0,
-                            minimum=0,
-                            precision=1,
-                            label="Minimum Free RAM (GB)",
+                        global_weight_spec = gr.Textbox(
+                            value="1.0",
+                            label="Global LoRA Weight(s)",
+                            placeholder="1.0 or -3:3:0.5",
                             info=(
-                                "0 = automatic: max(4 GB, 8% of the selected RAM budget). "
-                                "On Windows the same minimum is also required as commit headroom."
+                                "Use one value or an inclusive start:end:step range. "
+                                "The table below can override individual LoRAs."
                             ),
-                            interactive=False,
-                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_min_free_ram"
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_weights",
+                        )
+                        with FormRow():
+                            use_trigger_words = gr.Checkbox(
+                                value=True,
+                                label="Insert Trigger Words",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_use_triggers",
+                            )
+                            trigger_position = gr.Radio(
+                                choices=["Start", "End"],
+                                value="Start",
+                                label="Trigger Word Position",
+                                info="Start = before the prompt. End = after the LoRA tag.",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_trigger_pos",
+                            )
+                        gr.HTML(
+                            value=(
+                                "<p class='lora-tester-section-note'>"
+                                "Per-LoRA overrides: <code>0.8 | blank | blank</code> "
+                                "uses one weight; <code>-1 | 1 | 0.25</code> uses a range. "
+                                "Blank weight cells use the global setting. Blank triggers "
+                                "use metadata; <code>&lt;none&gt;</code> disables them.</p>"
+                            )
+                        )
+                        lora_settings = gr.Dataframe(
+                            value=[],
+                            headers=[
+                                "LoRA (do not edit)",
+                                "Trigger words (comma-separated)",
+                                "Min / single weight",
+                                "Max",
+                                "Step",
+                            ],
+                            datatype=["str", "str", "str", "str", "str"],
+                            type="array",
+                            row_count=(0, "dynamic"),
+                            col_count=(5, "fixed"),
+                            interactive=True,
+                            visible=False,
+                            wrap=True,
+                            height=300,
+                            column_widths=["30%", "34%", "14%", "11%", "11%"],
+                            label="Selected LoRA Settings",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_settings",
                         )
 
-            gr.HTML(
-                value=(
-                    "<p style='color: #888; font-size: 0.9em;'>"
-                    "The extension returns one or more labeled matrix pages. Each "
-                    "LoRA/weight or Embedding/weight combination creates one matrix "
-                    "cell and uses the same fixed seed.</p>"
-                )
+                    with gr.Group(visible=False) as embedding_controls:
+                        preset_bridge = gr.Textbox(
+                            value=resolve_forge_preset(forge_options=shared.opts),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_bridge",
+                            elem_classes=["lora-tester-preset-bridge"],
+                        )
+                        preset_refresh_bridge = gr.Button(
+                            "Sync Forge preset",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_preset_refresh",
+                            elem_classes=["lora-tester-preset-bridge"],
+                        )
+                        with FormRow():
+                            refresh_embeddings_btn = gr.Button(
+                                "Refresh Compatible Embeddings",
+                                variant="secondary",
+                                size="sm",
+                            )
+                        embedding_status = gr.HTML(
+                            value=(
+                                "<p class='lora-tester-section-note'>Choose Forge UI "
+                                "Preset <code>xl</code> to discover compatible Safetensors "
+                                "embeddings before loading a checkpoint.</p>"
+                            )
+                        )
+                        with FormRow():
+                            embedding_folder = gr.Dropdown(
+                                choices=[(
+                                    "Manual selection (all folders)",
+                                    self.ALL_EMBEDDING_FOLDERS,
+                                )],
+                                value=self.ALL_EMBEDDING_FOLDERS,
+                                label="Embedding Folder",
+                                info=(
+                                    "Safetensors headers are filtered for clip_l + clip_g; "
+                                    "the loaded checkpoint validates them at runtime."
+                                ),
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_folder",
+                            )
+                            include_embedding_subfolders = gr.Checkbox(
+                                value=True,
+                                label="Include subfolders",
+                                info="Also include compatible embeddings below the folder.",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_subfolders",
+                            )
+                        embedding_selection = gr.Dropdown(
+                            choices=[],
+                            multiselect=True,
+                            label="Select Embeddings to Test",
+                            info="Select one or more compatible textual inversion embeddings.",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_selection",
+                        )
+                        with FormRow():
+                            global_embedding_weight_spec = gr.Textbox(
+                                value="1.0",
+                                label="Global Embedding Weight(s)",
+                                placeholder="1.0 or 0.5:1.5:0.25",
+                                info=(
+                                    "Weights use Forge prompt attention. The table below "
+                                    "can override individual embeddings."
+                                ),
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_weights",
+                            )
+                            embedding_position = gr.Radio(
+                                choices=["Start", "End"],
+                                value="Start",
+                                label="Embedding Position",
+                                info="Insert the weighted embedding before or after the prompt.",
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_position",
+                            )
+                        gr.HTML(
+                            value=(
+                                "<p class='lora-tester-section-note'>Blank triggers use "
+                                "JSON metadata or the filename; <code>&lt;none&gt;</code> "
+                                "suppresses the additional trigger. Set Negative prompt? "
+                                "to <code>0</code> for positive or <code>1</code> for "
+                                "negative injection.</p>"
+                            )
+                        )
+                        embedding_settings = gr.Dataframe(
+                            value=[],
+                            headers=[
+                                "Embedding (do not edit)",
+                                "Trigger words (comma-separated)",
+                                "Negative prompt? (0 = Positive, 1 = Negative)",
+                                "Min / single weight",
+                                "Max",
+                                "Step",
+                            ],
+                            datatype=["str", "str", "str", "str", "str", "str"],
+                            type="array",
+                            row_count=(0, "dynamic"),
+                            col_count=(6, "fixed"),
+                            interactive=True,
+                            visible=False,
+                            wrap=True,
+                            height=300,
+                            column_widths=["25%", "28%", "19%", "11%", "9%", "8%"],
+                            label="Selected Embedding Settings",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_embedding_settings",
+                        )
+
+                with gr.Tab("2. Models & Run Size"):
+                    multi_model_mode = gr.Radio(
+                        choices=[
+                            self.MULTI_MODEL_CURRENT,
+                            self.MULTI_MODEL_LORA,
+                            self.MULTI_MODEL_PROMPT,
+                        ],
+                        value=self.MULTI_MODEL_CURRENT,
+                        label="Which models should be used?",
+                        info=(
+                            "Multiple-model modes run complete Forge jobs sequentially "
+                            "and fully unload each checkpoint before loading the next."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_model_mode",
+                    )
+                    with gr.Group(visible=False) as multi_model_controls:
+                        with FormRow():
+                            refresh_checkpoints_btn = gr.Button(
+                                "Refresh Checkpoint List",
+                                variant="secondary",
+                                size="sm",
+                            )
+                        checkpoint_selection = gr.Dropdown(
+                            choices=self._checkpoint_choices(),
+                            multiselect=True,
+                            label="Select Models / Checkpoints",
+                            info=(
+                                "Standard mode supports 25 checkpoints; Extreme Run "
+                                "Mode supports 150. Forge remains the compatibility authority."
+                            ),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_checkpoint_selection",
+                        )
+                        gr.HTML(
+                            value=(
+                                "<p class='lora-tester-section-note'>Prompt-only loads no "
+                                "LoRA file but reuses the same fixed-seed, disk-spooling, "
+                                "matrix, and recovery path.</p>"
+                            )
+                        )
+                    extreme_run_mode = gr.Checkbox(
+                        value=False,
+                        label=(
+                            "Extreme Run Mode (up to 10,000 matrix cells / "
+                            "150 checkpoints)"
+                        ),
+                        info=(
+                            "CAUTION: Extreme runs can take many hours or days and use "
+                            "very large amounts of disk space. Standard limits are 500 "
+                            "cells per model and 25 checkpoints."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_extreme_run",
+                    )
+
+                with gr.Tab("3. Grid"):
+                    with FormRow():
+                        save_original = gr.Checkbox(
+                            value=True,
+                            label="Generate reference image without tested item (Recommended)",
+                            info=(
+                                "The fixed-seed reference is repeated at the top of every "
+                                "matrix page."
+                            ),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_baseline",
+                        )
+                        draw_legend = gr.Checkbox(
+                            value=True,
+                            label="Draw legend (names, weights, and triggers)",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_draw_legend",
+                        )
+                    per_item_grids = gr.Checkbox(
+                        value=False,
+                        label="Create one grid per tested LoRA or Embedding",
+                        info="Disabled returns the familiar single combined matrix.",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_per_item_grids",
+                    )
+                    combined_overview = gr.Checkbox(
+                        value=True,
+                        interactive=False,
+                        label="Also create the combined overview",
+                        info=(
+                            "Available with per-item grids. Without them, the combined "
+                            "matrix remains the required primary output."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_combined_overview",
+                    )
+                    comparison_width_bridge = gr.Number(
+                        value=1024,
+                        precision=0,
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_width",
+                        elem_classes=["lora-tester-layout-bridge"],
+                    )
+                    comparison_height_bridge = gr.Number(
+                        value=1024,
+                        precision=0,
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_height",
+                        elem_classes=["lora-tester-layout-bridge"],
+                    )
+                    comparison_refresh_bridge = gr.Button(
+                        "Refresh comparison capacity",
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_refresh",
+                        elem_classes=["lora-tester-layout-bridge"],
+                    )
+                    comparison_capacity = gr.HTML(
+                        value=self._comparison_capacity_html(
+                            self.TEST_TYPE_LORA, [], [], 1024, 1024, 5, True, True
+                        ),
+                        visible=False,
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_capacity",
+                    )
+                    comparison_layout = gr.Radio(
+                        choices=[
+                            self.MATRIX_LAYOUT_STANDARD,
+                            self.MATRIX_LAYOUT_COMPARE_HORIZONTAL,
+                            self.MATRIX_LAYOUT_COMPARE_VERTICAL,
+                        ],
+                        value=self.MATRIX_LAYOUT_STANDARD,
+                        label="Combined matrix layout",
+                        info=(
+                            "Comparison rows/columns require identical weights for every "
+                            "item and support at most 10 items."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_comparison_layout",
+                    )
+                    with FormRow():
+                        matrix_cols = gr.Slider(
+                            minimum=1,
+                            maximum=10,
+                            step=1,
+                            value=3,
+                            label="Standard combined matrix columns",
+                            info=(
+                                "Used only by the Standard order combined overview. "
+                                "Per-item grids keep an item's weights together."
+                            ),
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_cols",
+                        )
+                        matrix_margin = gr.Slider(
+                            minimum=0,
+                            maximum=50,
+                            step=1,
+                            value=5,
+                            label="Matrix Image Margin (px)",
+                            elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_matrix_margin",
+                        )
+
+                with gr.Tab("4. Output & Safety"):
+                    output_retention = gr.Radio(
+                        choices=[self.KEEP_INDIVIDUAL_OUTPUT, self.MATRIX_ONLY_OUTPUT],
+                        value=self.KEEP_INDIVIDUAL_OUTPUT,
+                        label="Output retention",
+                        info=(
+                            "CAUTION: Matrix-only deletes individual comparison images "
+                            "only after every matrix page was created and validated. "
+                            "Failures retain the sources for recovery."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_output_retention",
+                    )
+                    unload_models_before_matrix = gr.Checkbox(
+                        value=True,
+                        label=(
+                            "Unload checkpoint, text encoder and VAE before building "
+                            "the matrix (Recommended)"
+                        ),
+                        info=(
+                            "Frees Forge model RAM/VRAM for larger matrix pages. The "
+                            "selected checkpoint reloads automatically for the next job."
+                        ),
+                        elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_unload_models",
+                    )
+                    gr.HTML(
+                        value=(
+                            "<div class='lora-tester-safety-note'><b>Active safeguards:</b> "
+                            "completed cells are spooled to disk, model state can be fully "
+                            "unloaded before composition, pages stay below the fixed axis "
+                            "and area limits, and Matrix-only sources are deleted only after "
+                            "successful validation.</div>"
+                        )
+                    )
+
+            run_summary = gr.HTML(
+                value=self._run_summary_html(
+                    self.TEST_TYPE_LORA,
+                    [],
+                    "1.0",
+                    [],
+                    [],
+                    "1.0",
+                    [],
+                    True,
+                    self.MULTI_MODEL_CURRENT,
+                    [],
+                    False,
+                ),
+                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_run_summary",
             )
 
         # Event handlers
@@ -2175,6 +2286,46 @@ class LoRaTesterScript(scripts.Script):
                 gr.update(visible=embedding_mode),
             )
 
+        def toggle_multi_model_controls(selected_mode):
+            return gr.update(visible=selected_mode != self.MULTI_MODEL_CURRENT)
+
+        def update_run_summary(
+            selected_type,
+            selected_loras,
+            lora_weights,
+            selected_lora_settings,
+            selected_embeddings,
+            embedding_weights,
+            selected_embedding_settings,
+            reference_enabled,
+            selected_model_mode,
+            selected_models,
+            extreme_enabled,
+        ):
+            return self._run_summary_html(
+                selected_type,
+                selected_loras,
+                lora_weights,
+                selected_lora_settings,
+                selected_embeddings,
+                embedding_weights,
+                selected_embedding_settings,
+                reference_enabled,
+                selected_model_mode,
+                selected_models,
+                extreme_enabled,
+            )
+
+        def update_checkpoint_list(selected_checkpoints):
+            choices = self._checkpoint_choices(refresh=True)
+            valid_values = {value for _, value in choices}
+            preserved = [
+                checkpoint
+                for checkpoint in (selected_checkpoints or [])
+                if checkpoint in valid_values
+            ]
+            return gr.update(choices=choices, value=preserved)
+
         def update_output_controls(create_per_item, create_combined):
             create_per_item, combined_enabled = self._resolve_matrix_outputs(
                 create_per_item,
@@ -2371,6 +2522,20 @@ class LoRaTesterScript(scripts.Script):
             outputs=[embedding_settings],
         )
 
+        multi_model_mode.change(
+            fn=toggle_multi_model_controls,
+            inputs=[multi_model_mode],
+            outputs=[multi_model_controls],
+            queue=False,
+        )
+
+        refresh_checkpoints_btn.click(
+            fn=update_checkpoint_list,
+            inputs=[checkpoint_selection],
+            outputs=[checkpoint_selection],
+            show_progress=False,
+        )
+
         per_item_grids.change(
             fn=update_output_controls,
             inputs=[per_item_grids, combined_overview],
@@ -2435,6 +2600,28 @@ class LoRaTesterScript(scripts.Script):
             show_progress=False,
         )
 
+        run_summary_inputs = [
+            test_type,
+            lora_selection,
+            global_weight_spec,
+            lora_settings,
+            embedding_selection,
+            global_embedding_weight_spec,
+            embedding_settings,
+            save_original,
+            multi_model_mode,
+            checkpoint_selection,
+            extreme_run_mode,
+        ]
+        for component in run_summary_inputs:
+            component.change(
+                fn=update_run_summary,
+                inputs=run_summary_inputs,
+                outputs=[run_summary],
+                queue=False,
+                show_progress=False,
+            )
+
         # Return all components that will be passed to processing callbacks.
         return [
             lora_tester_enabled,
@@ -2458,10 +2645,8 @@ class LoRaTesterScript(scripts.Script):
             matrix_margin,
             output_retention,
             unload_models_before_matrix,
-            adaptive_ram,
-            ram_budget,
-            custom_ram_gb,
-            minimum_free_ram_gb
+            multi_model_mode,
+            checkpoint_selection,
         ]
 
     def before_process(self, p: StableDiffusionProcessing,
@@ -2475,7 +2660,7 @@ class LoRaTesterScript(scripts.Script):
                        matrix_cols, matrix_margin,
                        output_retention,
                        unload_models_before_matrix,
-                       adaptive_ram, ram_budget, custom_ram_gb, minimum_free_ram_gb):
+                       multi_model_mode=None, checkpoint_selection=None):
         """
         Prepare the current generation before Forge expands prompts and seeds.
 
@@ -2488,9 +2673,110 @@ class LoRaTesterScript(scripts.Script):
         if not lora_tester_enabled:
             return
 
+        multi_model_mode = multi_model_mode or self.MULTI_MODEL_CURRENT
+        multi_model_error = self._multi_model_request_error(
+            multi_model_mode,
+            checkpoint_selection,
+            test_type,
+            lora_selection,
+            extreme_run_mode,
+        )
+        if multi_model_error:
+            self._block_generation(p, multi_model_error)
+            return
+
+        if multi_model_mode != self.MULTI_MODEL_CURRENT:
+            model_jobs, missing_checkpoints = self._resolve_checkpoint_jobs(
+                checkpoint_selection
+            )
+            if missing_checkpoints:
+                self._block_generation(
+                    p,
+                    "One or more selected checkpoints are no longer available. "
+                    "Refresh the checkpoint list. First missing item: "
+                    f"'{missing_checkpoints[0]}'.",
+                )
+                return
+
+            self._ensure_temp_directory()
+            output_mode = self._processing_output_mode(p)
+            try:
+                session_dir, individual_output_dir = self._create_spool_directory(
+                    p,
+                    output_mode,
+                )
+            except OSError as error:
+                self._block_generation(
+                    p,
+                    f"Could not create the multiple-model spool directory: {error}",
+                )
+                return
+
+            state = {
+                'multi_model': True,
+                'multi_model_mode': multi_model_mode,
+                'model_jobs': model_jobs,
+                'model_results': [],
+                'multi_model_pages': [],
+                'multi_model_infotexts': [],
+                'multi_model_prompts': [],
+                'multi_model_negative_prompts': [],
+                'multi_model_seeds': [],
+                'multi_model_subseeds': [],
+                'original_checkpoint': None,
+                'original_model_restored': False,
+                'cases': [
+                    {
+                        'kind': 'model',
+                        'label': job['label'],
+                        'checkpoint': job['checkpoint'],
+                    }
+                    for job in model_jobs
+                ],
+                'cells': {},
+                'rows': [],
+                'matrix_outputs': [],
+                'matrix_cols': int(matrix_cols),
+                'matrix_margin': int(matrix_margin),
+                'draw_legend': bool(draw_legend),
+                'output_retention': output_retention,
+                'output_mode': output_mode,
+                'individual_output_dir': str(individual_output_dir),
+                'session_dir': str(session_dir),
+                'manifest_path': str(session_dir / "manifest.json"),
+                'fixed_seed': None,
+                'fixed_subseed': None,
+                'model_unload_attempted': False,
+                'model_unloaded': False,
+            }
+            setattr(p, self.PROCESSING_STATE_ATTRIBUTE, state)
+            self._write_manifest(state, "models-pending")
+
+            # The outer Forge job is only the coordinator. Every selected model is
+            # executed by a fresh nested process_images() job in process(), which
+            # lets Forge recalculate family-specific latent shapes, samplers, text
+            # encoders and VAEs instead of switching inside one initialized loop.
+            # Run our coordinator callbacks after every other always-on script so
+            # none of them can restore an iteration that would sample the shell job.
+            self._move_spool_hooks_last(p)
+            p.n_iter = 1
+            p.batch_size = 1
+            p.do_not_save_grid = True
+            p.do_not_save_samples = True
+            print(
+                f"[LoRA Tester] Multiple-model mode enabled with "
+                f"{len(model_jobs)} sequential checkpoint job(s)"
+            )
+            return
+
         embedding_mode = test_type == self.TEST_TYPE_EMBEDDING
-        selected_items = embedding_selection if embedding_mode else lora_selection
-        item_label = "Embedding" if embedding_mode else "LoRA"
+        prompt_only_mode = test_type == self.TEST_TYPE_PROMPT
+        if prompt_only_mode:
+            selected_items = [self.PROMPT_ONLY_SENTINEL]
+            item_label = "Prompt"
+        else:
+            selected_items = embedding_selection if embedding_mode else lora_selection
+            item_label = "Embedding" if embedding_mode else "LoRA"
         if not selected_items:
             self._block_generation(
                 p,
@@ -2527,24 +2813,27 @@ class LoRaTesterScript(scripts.Script):
                     f"embedding list. First unavailable item: '{missing_embeddings[0]}'.",
                 )
                 return
-        elif not self.cached_loras:
+        elif not prompt_only_mode and not self.cached_loras:
             self.cached_loras = LoRaMetadataReader.find_all_loras()
 
-        selected_global_spec = (
-            global_embedding_weight_spec if embedding_mode else global_weight_spec
-        )
-        global_weight_text = self._cell_text(selected_global_spec)
-        if global_weight_text:
-            global_weights = self._parse_weight_spec(global_weight_text, "global")
-            if global_weights is None:
-                self._block_generation(
-                    p,
-                    "The global weight is invalid. Enter one number or an inclusive "
-                    "Min:Max:Step range (for example -1:1:0.25).",
-                )
-                return
+        if prompt_only_mode:
+            global_weights = [None]
         else:
-            global_weights = [1.0]
+            selected_global_spec = (
+                global_embedding_weight_spec if embedding_mode else global_weight_spec
+            )
+            global_weight_text = self._cell_text(selected_global_spec)
+            if global_weight_text:
+                global_weights = self._parse_weight_spec(global_weight_text, "global")
+                if global_weights is None:
+                    self._block_generation(
+                        p,
+                        "The global weight is invalid. Enter one number or an inclusive "
+                        "Min:Max:Step range (for example -1:1:0.25).",
+                    )
+                    return
+            else:
+                global_weights = [1.0]
 
         settings_by_lora = {
             str(row[0]): row
@@ -2559,10 +2848,14 @@ class LoRaTesterScript(scripts.Script):
 
         case_limit = self._maximum_total_cases(extreme_run_mode)
         cases = []
+        batch_model_label = getattr(p, self.BATCH_MODEL_LABEL_ATTRIBUTE, None)
         if save_original:
+            baseline_label = f"Baseline (No {item_label})"
+            if batch_model_label:
+                baseline_label = f"{batch_model_label} — {baseline_label}"
             cases.append({
                 'kind': "baseline",
-                'label': f"Baseline (No {item_label})",
+                'label': baseline_label,
                 'item_key': None,
                 'item_label': None,
                 'lora_tag_name': None,
@@ -2572,7 +2865,15 @@ class LoRaTesterScript(scripts.Script):
             })
 
         for item_path in selected_items:
-            if embedding_mode:
+            if prompt_only_mode:
+                display_name = batch_model_label or "Prompt only"
+                embedding_name = None
+                embedding_target = None
+                lora_tag_name = None
+                trigger_words = []
+                weights = [None]
+                weight_error = None
+            elif embedding_mode:
                 embedding_info = self.cached_embeddings.get(item_path)
                 if embedding_info is None:
                     print(
@@ -2651,12 +2952,26 @@ class LoRaTesterScript(scripts.Script):
                     )
                     return
 
-                formatted_weight = self._format_weight(weight)
+                formatted_weight = (
+                    None if prompt_only_mode else self._format_weight(weight)
+                )
+                if prompt_only_mode:
+                    case_label = display_name
+                    case_item_label = display_name
+                else:
+                    case_item_label = display_name
+                    if batch_model_label:
+                        case_item_label = f"{batch_model_label} — {display_name}"
+                    case_label = f"{case_item_label} (weight {formatted_weight})"
                 cases.append({
-                    'kind': "embedding" if embedding_mode else "lora",
-                    'label': f"{display_name} (weight {formatted_weight})",
+                    'kind': (
+                        "prompt"
+                        if prompt_only_mode
+                        else ("embedding" if embedding_mode else "lora")
+                    ),
+                    'label': case_label,
                     'item_key': item_path,
-                    'item_label': display_name,
+                    'item_label': case_item_label,
                     'lora_tag_name': lora_tag_name,
                     'embedding_name': embedding_name,
                     'embedding_target': embedding_target,
@@ -2700,30 +3015,6 @@ class LoRaTesterScript(scripts.Script):
             print(f"[LoRA Tester] Could not create disk spool directory: {error}")
             return
 
-        ram_settings = self._resolve_ram_settings(
-            ram_budget,
-            custom_ram_gb,
-            minimum_free_ram_gb,
-        )
-        ram_protection_active = bool(
-            self.RAM_WATCHDOG_ENABLED and adaptive_ram and psutil is not None
-        )
-        ram_monitor = RamMonitor() if ram_protection_active else None
-        if ram_monitor is not None:
-            ram_monitor.start()
-            try:
-                ram_finalizer = weakref.finalize(p, ram_monitor.stop)
-            except TypeError:
-                ram_finalizer = None
-        else:
-            ram_finalizer = None
-
-        calibration_case_index = next(
-            index
-            for index, case in enumerate(cases)
-            if not self._case_is_baseline(case)
-        )
-
         state = {
             'cases': cases,
             'test_type': test_type,
@@ -2749,28 +3040,14 @@ class LoRaTesterScript(scripts.Script):
             'unload_models_before_matrix': bool(unload_models_before_matrix),
             'model_unload_attempted': False,
             'model_unloaded': False,
-            'adaptive_ram': ram_protection_active,
             'session_dir': str(session_dir),
             'manifest_path': str(session_dir / "manifest.json"),
             'cells': {},
             'rows': [],
             'matrix_outputs': [],
             'reference_row': None,
-            'ram_monitor': ram_monitor,
-            'ram_finalizer': ram_finalizer,
             'fixed_seed': None,
             'fixed_subseed': None,
-            'observed_peak_bytes': 0,
-            'observed_transient_peak_bytes': 0,
-            'observed_persistent_growth_bytes': 0,
-            'last_generation_memory': None,
-            'maximum_row_peak_bytes': 0,
-            'ram_calibration_case_index': calibration_case_index,
-            'ram_calibrated': False,
-            'calibrated_available_bytes': 0,
-            'calibrated_commit_available_bytes': 0,
-            'ram_stop_reason': None,
-            **ram_settings,
         }
         setattr(p, self.PROCESSING_STATE_ATTRIBUTE, state)
         self._write_manifest(state, "generating")
@@ -2795,25 +3072,443 @@ class LoRaTesterScript(scripts.Script):
             f"{len(selected_items)} selected item(s)"
         )
         print(f"[LoRA Tester] Will generate {len(cases)} matrix cells total")
-        if state['adaptive_ram']:
-            print(
-                f"[LoRA Tester] Adaptive RAM: budget {state['configured_total_bytes'] / GIB:.1f} GB, "
-                f"minimum free {state['minimum_free_bytes'] / GIB:.1f} GB"
+
+    @staticmethod
+    def _snapshot_forge_model_state():
+        """Capture Forge's selected model inputs before sequential overrides."""
+
+        from modules import sd_models
+
+        loading_parameters = dict(sd_models.model_data.forge_loading_parameters)
+        if isinstance(loading_parameters.get('additional_modules'), list):
+            loading_parameters['additional_modules'] = list(
+                loading_parameters['additional_modules']
             )
-            commit_total, commit_available = self._windows_commit_snapshot()
-            if commit_available:
-                print(
-                    f"[LoRA Tester] Windows commit headroom: "
-                    f"{commit_available / GIB:.1f} GB available of "
-                    f"{commit_total / GIB:.1f} GB total"
+        return {
+            'checkpoint': getattr(shared.opts, 'sd_model_checkpoint', None),
+            'additional_modules': list(
+                getattr(shared.opts, 'forge_additional_modules', []) or []
+            ),
+            'loading_parameters': loading_parameters,
+        }
+
+    @classmethod
+    def _restore_forge_model_state(cls, p, snapshot):
+        """Restore the exact original Forge selection and reload it for the outer job."""
+
+        from modules import processing as forge_processing, sd_models
+        from modules.sysinfo import set_config
+
+        original_settings = {
+            'sd_model_checkpoint': snapshot.get('checkpoint'),
+            'forge_additional_modules': snapshot.get('additional_modules', []),
+        }
+        set_config(
+            original_settings,
+            is_api=True,
+            run_callbacks=False,
+            save_config=False,
+        )
+        sd_models.model_data.forge_loading_parameters = dict(
+            snapshot.get('loading_parameters') or {}
+        )
+        forge_processing.need_global_unload = True
+        forge_processing.manage_model_and_prompt_cache(p)
+
+    def _persist_multi_model_outputs(self, state, job, processed):
+        """Normalize nested Gallery results to validated disk paths."""
+
+        pages = []
+        infotexts = []
+        source_infotexts = list(getattr(processed, 'infotexts', []) or [])
+        fallback_infotext = source_infotexts[0] if source_infotexts else ""
+        for output_index, output in enumerate(getattr(processed, 'images', []) or []):
+            if isinstance(output, Image.Image):
+                destination = Path(state['session_dir']) / (
+                    f"model-{len(state.get('model_results', [])):02d}-"
+                    f"page-{output_index:03d}.png"
                 )
-        elif not self.RAM_WATCHDOG_ENABLED:
-            print(
-                "[LoRA Tester] RAM watchdog disabled for v0.1.0; "
-                "disk spooling and pre-matrix model unload remain active"
+                parameters = (
+                    source_infotexts[output_index]
+                    if output_index < len(source_infotexts)
+                    else fallback_infotext
+                )
+                self._save_png_atomic(output, destination, parameters=parameters)
+                output_path = destination
+            else:
+                output_path = Path(str(output))
+
+            if not output_path.exists() or output_path.stat().st_size <= 0:
+                raise RuntimeError(
+                    f"Model '{job['label']}' returned a missing or empty output page: "
+                    f"{output_path}"
+                )
+            pages.append(str(output_path))
+            infotexts.append(
+                source_infotexts[output_index]
+                if output_index < len(source_infotexts)
+                else fallback_infotext
             )
-        elif adaptive_ram and psutil is None:
-            print("[LoRA Tester] Warning: psutil unavailable; adaptive RAM protection is disabled")
+        return pages, infotexts
+
+    @classmethod
+    def _multi_model_page_geometry(cls, page_records, requested_columns, margin):
+        """Return the uniform grid geometry for persisted per-model pages."""
+
+        if not page_records:
+            return {
+                'columns': 0,
+                'rows': 0,
+                'cell_width': 0,
+                'cell_height': 0,
+                'width': 0,
+                'height': 0,
+            }
+
+        columns = max(1, min(int(requested_columns), len(page_records)))
+        rows = (len(page_records) + columns - 1) // columns
+        cell_width = max(int(record['width']) for record in page_records)
+        cell_height = max(int(record['height']) for record in page_records)
+        margin = max(0, int(margin))
+        return {
+            'columns': columns,
+            'rows': rows,
+            'cell_width': cell_width,
+            'cell_height': cell_height,
+            'width': cell_width * columns + margin * max(0, columns - 1),
+            'height': cell_height * rows + margin * max(0, rows - 1),
+        }
+
+    @classmethod
+    def _split_multi_model_overview_records(
+        cls,
+        page_records,
+        requested_columns,
+        margin,
+    ):
+        """Keep model pages together unless the matrix limits require a split."""
+
+        chunks = []
+        current = []
+
+        def is_safe(records):
+            geometry = cls._multi_model_page_geometry(
+                records,
+                requested_columns,
+                margin,
+            )
+            return (
+                geometry['width'] <= cls.MAX_MATRIX_DIMENSION
+                and geometry['height'] <= cls.MAX_MATRIX_DIMENSION
+                and geometry['width'] * geometry['height'] <= cls.MAX_MATRIX_PIXELS
+            )
+
+        for record in page_records:
+            candidate = current + [record]
+            if is_safe(candidate):
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+            current = [record]
+            if not is_safe(current):
+                raise RuntimeError(
+                    f"Per-model page {record.get('path')!r} exceeds the matrix limits"
+                )
+
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _build_multi_model_overview_pages(
+        self,
+        p,
+        processed,
+        state,
+        source_pages,
+        source_infotexts,
+    ):
+        """Compose persisted per-model grids into shared comparison pages."""
+
+        records = []
+        for page_index, page_path in enumerate(source_pages):
+            path = Path(page_path)
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise RuntimeError(f"Missing per-model page: {path}")
+            with Image.open(path) as source:
+                width, height = source.size
+            records.append(
+                {
+                    'index': page_index,
+                    'path': str(path),
+                    'width': int(width),
+                    'height': int(height),
+                }
+            )
+
+        chunks = self._split_multi_model_overview_records(
+            records,
+            state.get('matrix_cols', 1),
+            state.get('matrix_margin', 0),
+        )
+        model_labels = [
+            result.get('label') or result.get('title') or result.get('checkpoint')
+            for result in state.get('model_results', [])
+            if result.get('status') == 'complete'
+        ]
+        model_summary = ", ".join(str(label) for label in model_labels if label)
+        base_infotext = source_infotexts[0] if source_infotexts else ""
+        grid_info = base_infotext or "LoRA Tester multi-model comparison"
+        if model_summary:
+            grid_info += f"\nLoRA Tester models: {model_summary}"
+
+        background = ImageColor.getcolor(shared.opts.grid_background_color, "RGB")
+        margin = max(0, int(state.get('matrix_margin', 0)))
+        page_paths = []
+        for page_number, chunk in enumerate(chunks, start=1):
+            geometry = self._multi_model_page_geometry(
+                chunk,
+                state.get('matrix_cols', 1),
+                margin,
+            )
+            canvas = Image.new(
+                "RGB",
+                (geometry['width'], geometry['height']),
+                background,
+            )
+            try:
+                for chunk_index, record in enumerate(chunk):
+                    column = chunk_index % geometry['columns']
+                    row = chunk_index // geometry['columns']
+                    with Image.open(record['path']) as source:
+                        source.load()
+                        converted = (
+                            source if source.mode == "RGB" else source.convert("RGB")
+                        )
+                        x = (
+                            column * (geometry['cell_width'] + margin)
+                            + (geometry['cell_width'] - converted.width) // 2
+                        )
+                        y = (
+                            row * (geometry['cell_height'] + margin)
+                            + (geometry['cell_height'] - converted.height) // 2
+                        )
+                        canvas.paste(converted, (x, y))
+                        if converted is not source:
+                            converted.close()
+
+                if getattr(shared.opts, 'grid_save', False):
+                    seed_values = list(getattr(processed, 'all_seeds', []) or [])
+                    prompt_values = list(getattr(processed, 'all_prompts', []) or [])
+                    session_name = Path(state['session_dir']).name
+                    page_path, _ = images.save_image(
+                        canvas,
+                        p.outpath_grids,
+                        "lora_tester_multi_model_overview",
+                        seed=(
+                            seed_values[0]
+                            if seed_values
+                            else state.get('fixed_seed', -1)
+                        ),
+                        prompt=(
+                            prompt_values[0]
+                            if prompt_values
+                            else str(p.prompt)
+                        ),
+                        extension=shared.opts.grid_format,
+                        info=grid_info,
+                        grid=True,
+                        p=p,
+                        suffix=f"-page-{page_number:03d}",
+                        forced_filename=(
+                            f"lora_tester_grid-{session_name}-multi-model-overview-"
+                            f"page-{page_number:03d}"
+                        ),
+                        save_to_dirs=False,
+                    )
+                else:
+                    page_path = Path(state['session_dir']) / (
+                        f"matrix-multi-model-overview-page-{page_number:03d}.png"
+                    )
+                    parameters = (
+                        grid_info
+                        if getattr(shared.opts, 'enable_pnginfo', False)
+                        else None
+                    )
+                    self._save_png_atomic(canvas, page_path, parameters=parameters)
+                page_paths.append(str(page_path))
+            finally:
+                canvas.close()
+
+        self._validate_matrix_pages(page_paths)
+        print(
+            f"[LoRA Tester] Combined {len(source_pages)} per-model page(s) into "
+            f"{len(page_paths)} shared overview page(s)"
+        )
+        return page_paths, [grid_info] * len(page_paths)
+
+    def _run_multi_model_jobs(self, p, state, arguments):
+        """Run the normal single-model tester once per checkpoint, strictly serially."""
+
+        from modules import processing as forge_processing
+
+        snapshot = self._snapshot_forge_model_state()
+        state['original_checkpoint'] = snapshot.get('checkpoint')
+        fixed_seed = int(p.all_seeds[0]) if p.all_seeds else int(p.seed)
+        fixed_subseed = (
+            int(p.all_subseeds[0]) if p.all_subseeds else int(p.subseed)
+        )
+        state['fixed_seed'] = fixed_seed
+        state['fixed_subseed'] = fixed_subseed
+        self._write_manifest(state, "models-running")
+
+        try:
+            for model_index, job in enumerate(state['model_jobs']):
+                if shared.state.interrupted or shared.state.stopping_generation:
+                    break
+
+                shared.state.job = (
+                    f"LoRA Tester model {model_index + 1} of "
+                    f"{len(state['model_jobs'])}: {job['label']}"
+                )
+                result = {
+                    'checkpoint': job['checkpoint'],
+                    'title': job['title'],
+                    'label': job['label'],
+                    'status': 'running',
+                    'pages': [],
+                }
+                unload_succeeded = False
+                job_p = copy.copy(p)
+                job_p.styles = list(getattr(p, 'styles', []) or [])
+                job_p.override_settings = dict(
+                    getattr(p, 'override_settings', {}) or {}
+                )
+                job_p.override_settings['sd_model_checkpoint'] = job['checkpoint']
+                job_p.override_settings_restore_afterwards = True
+                job_p.n_iter = 1
+                job_p.batch_size = 1
+                job_p.seed = fixed_seed
+                job_p.subseed = fixed_subseed
+                setattr(job_p, self.BATCH_MODEL_LABEL_ATTRIBUTE, job['label'])
+
+                nested_script_args = list(p.script_args)
+                nested_arguments = self._prepare_multi_model_job_arguments(
+                    arguments,
+                    state['multi_model_mode'],
+                )
+                nested_script_args[self.args_from:self.args_to] = nested_arguments
+                job_p.script_args = nested_script_args
+
+                try:
+                    print(
+                        f"[LoRA Tester] Loading model {model_index + 1}/"
+                        f"{len(state['model_jobs'])}: {job['title']}"
+                    )
+                    nested_processed = forge_processing.process_images(job_p)
+                    pages, infotexts = self._persist_multi_model_outputs(
+                        state,
+                        job,
+                        nested_processed,
+                    )
+                    if not pages:
+                        raise RuntimeError(
+                            f"Model '{job['label']}' completed without output pages"
+                        )
+
+                    state['multi_model_pages'].extend(pages)
+                    state['multi_model_infotexts'].extend(infotexts)
+                    page_count = len(pages)
+                    source_prompts = list(
+                        getattr(nested_processed, 'all_prompts', []) or []
+                    )
+                    source_negative_prompts = list(
+                        getattr(nested_processed, 'all_negative_prompts', []) or []
+                    )
+                    source_seeds = list(
+                        getattr(nested_processed, 'all_seeds', []) or []
+                    )
+                    source_subseeds = list(
+                        getattr(nested_processed, 'all_subseeds', []) or []
+                    )
+                    state['multi_model_prompts'].extend(
+                        [source_prompts[0] if source_prompts else str(p.prompt)]
+                        * page_count
+                    )
+                    state['multi_model_negative_prompts'].extend(
+                        [
+                            source_negative_prompts[0]
+                            if source_negative_prompts
+                            else str(p.negative_prompt)
+                        ]
+                        * page_count
+                    )
+                    state['multi_model_seeds'].extend(
+                        [source_seeds[0] if source_seeds else fixed_seed] * page_count
+                    )
+                    state['multi_model_subseeds'].extend(
+                        [
+                            source_subseeds[0]
+                            if source_subseeds
+                            else fixed_subseed
+                        ]
+                        * page_count
+                    )
+                    result['status'] = 'complete'
+                    result['pages'] = pages
+                except Exception as error:
+                    result['status'] = 'failed'
+                    result['error'] = str(error)
+                    print(
+                        f"[LoRA Tester] Model job failed for {job['title']}: {error}"
+                    )
+                finally:
+                    state['model_unload_attempted'] = True
+                    try:
+                        self._full_forge_model_unload(job_p)
+                        state['model_unloaded'] = True
+                        result['unloaded'] = True
+                        unload_succeeded = True
+                    except Exception as unload_error:
+                        state['model_unloaded'] = False
+                        result['unloaded'] = False
+                        result['unload_error'] = str(unload_error)
+                        if result['status'] == 'complete':
+                            result['status'] = 'unload-failed'
+                        print(
+                            f"[LoRA Tester] Warning: complete unload failed after "
+                            f"{job['title']}: {unload_error}"
+                        )
+
+                state['model_results'].append(result)
+                self._write_manifest(state, "models-running")
+                if not unload_succeeded:
+                    print(
+                        "[LoRA Tester] Stopping the multiple-model run because "
+                        "the previous checkpoint could not be confirmed as unloaded"
+                    )
+                    break
+        finally:
+            try:
+                self._restore_forge_model_state(p, snapshot)
+                state['original_model_restored'] = True
+                print(
+                    "[LoRA Tester] Restored the original Forge model selection: "
+                    f"{state.get('original_checkpoint')}"
+                )
+            except Exception as restore_error:
+                state['original_model_restore_error'] = str(restore_error)
+                print(
+                    "[LoRA Tester] ERROR: could not restore the original Forge "
+                    f"model selection: {restore_error}"
+                )
+            finally:
+                # The outer processing object is only a result-delivery shell. Its
+                # already-expanded prompt/seed arrays remain valid for Processed,
+                # while zero iterations prevent an accidental extra generation.
+                p.n_iter = 0
+                p.batch_size = 1
+                self._write_manifest(state, "models-finished")
 
     def process(self, p: StableDiffusionProcessing, *args):
         """Use one fixed seed so every item/weight comparison is meaningful."""
@@ -2822,6 +3517,10 @@ class LoRaTesterScript(scripts.Script):
 
         state = getattr(p, self.PROCESSING_STATE_ATTRIBUTE, None)
         if not state:
+            return
+
+        if state.get('multi_model'):
+            self._run_multi_model_jobs(p, state, args)
             return
 
         if p.all_seeds:
@@ -2896,6 +3595,17 @@ class LoRaTesterScript(scripts.Script):
             ),
         )
 
+    @staticmethod
+    def _suppress_multi_model_coordinator_batch(state, prompts):
+        """Prevent the result-delivery shell from entering Forge's sampler."""
+
+        if not state.get('multi_model'):
+            return False
+        if prompts is not None:
+            prompts.clear()
+        state['outer_sampling_suppressed'] = True
+        return True
+
     def before_process_batch(self, p: StableDiffusionProcessing, *args, **kwargs):
         """
         Modify prompts before each batch - this is where we inject LoRA tags
@@ -2916,6 +3626,13 @@ class LoRaTesterScript(scripts.Script):
         seeds = kwargs.get('seeds', getattr(p, 'seeds', []))
         subseeds = kwargs.get('subseeds', getattr(p, 'subseeds', []))
 
+        # p.n_iter is set to zero after the nested model jobs, but another
+        # always-on script may still change it. An empty prompt list is Forge's
+        # supported per-batch stop path and guarantees that the outer coordinator
+        # only delivers the pages already produced by the nested jobs.
+        if self._suppress_multi_model_coordinator_batch(state, prompts):
+            return
+
         if not prompts:
             return
 
@@ -2928,60 +3645,6 @@ class LoRaTesterScript(scripts.Script):
         # here, before the sampler consumes its first noise tensor.
         self._force_batch_rng_seed(p, state, batch_number, seeds, subseeds)
 
-        calibration_case_index = state.get('ram_calibration_case_index', 0)
-        if state.get('adaptive_ram') and batch_number > calibration_case_index:
-            effective_available = self._effective_available(state)
-            commit_total, commit_available = self._windows_commit_snapshot()
-            if not state.get('ram_calibrated'):
-                state['ram_calibrated'] = True
-                state['calibrated_available_bytes'] = effective_available
-                state['calibrated_commit_available_bytes'] = commit_available
-                self._write_manifest(state, "ram-calibrated")
-                interval = state.get('last_generation_memory') or {}
-                commit_text = (
-                    f"; Windows commit headroom {commit_available / GIB:.1f} GB "
-                    f"of {commit_total / GIB:.1f} GB total"
-                    if commit_available
-                    else ""
-                )
-                print(
-                    f"[LoRA Tester] RAM after first comparison generation: "
-                    f"{effective_available / GIB:.1f} GB effective available; "
-                    f"persistent physical change "
-                    f"{interval.get('persistent_growth_bytes', 0) / GIB:.1f} GB; "
-                    f"temporary physical drop "
-                    f"{state.get('observed_transient_peak_bytes', 0) / GIB:.1f} GB"
-                    f"{commit_text}"
-                )
-
-            minimum_free = state['minimum_free_bytes']
-            shortages = []
-            if effective_available and effective_available < minimum_free:
-                shortages.append(
-                    f"{effective_available / GIB:.1f} GB effective physical RAM available"
-                )
-            if commit_available and commit_available < minimum_free:
-                shortages.append(
-                    f"{commit_available / GIB:.1f} GB Windows commit headroom"
-                )
-
-            if shortages:
-                reason = (
-                    f"RAM safety stop before cell {batch_number + 1}: "
-                    f"{' and '.join(shortages)}; "
-                    f"minimum required {minimum_free / GIB:.1f} GB"
-                )
-                state['ram_stop_reason'] = reason
-                self._write_manifest(state, "ram-safety-stop")
-                print(f"[LoRA Tester] {reason}")
-                prompts.clear()
-                shared.state.interrupted = True
-                return
-
-        monitor = state.get('ram_monitor')
-        if monitor is not None:
-            monitor.begin_interval()
-
         case = state['cases'][batch_number]
         if self._case_is_baseline(case):
             state['effective_prompts'][batch_number] = prompts[0]
@@ -2991,6 +3654,17 @@ class LoRaTesterScript(scripts.Script):
             print(
                 f"[LoRA Tester] Batch {batch_number}: "
                 f"Baseline (no {state.get('test_type', 'LoRA')})"
+            )
+            return
+
+        if case.get('kind') == "prompt":
+            state['effective_prompts'][batch_number] = prompts[0]
+            negative_prompts = getattr(p, 'negative_prompts', []) or []
+            if negative_prompts:
+                state['effective_negative_prompts'][batch_number] = negative_prompts[0]
+            print(
+                f"[LoRA Tester] Batch {batch_number}: {case['label']} -> "
+                "Prompt only (no LoRA injection)"
             )
             return
 
@@ -3141,26 +3815,6 @@ class LoRaTesterScript(scripts.Script):
             saved = True
         except Exception as error:
             print(f"[LoRA Tester] Could not spool cell {case_index + 1}: {error}")
-        finally:
-            monitor = state.get('ram_monitor')
-            if monitor is not None:
-                interval = monitor.end_interval(detailed=True)
-                interval_peak = interval['total_drop_bytes']
-                transient_peak = interval['transient_drop_bytes']
-                persistent_growth = interval['persistent_growth_bytes']
-                state['last_generation_memory'] = interval
-                state['observed_peak_bytes'] = max(
-                    state.get('observed_peak_bytes', 0),
-                    interval_peak,
-                )
-                state['observed_transient_peak_bytes'] = max(
-                    state.get('observed_transient_peak_bytes', 0),
-                    transient_peak,
-                )
-                state['observed_persistent_growth_bytes'] = max(
-                    state.get('observed_persistent_growth_bytes', 0),
-                    persistent_growth,
-                )
 
         if not saved:
             return
@@ -3185,6 +3839,126 @@ class LoRaTesterScript(scripts.Script):
         if (case_index + 1) % max(1, state['matrix_cols']) == 0:
             gc.collect()
 
+    def _postprocess_multi_model(self, p, processed, state):
+        """Combine persisted per-model pages and deliver them through the outer job."""
+
+        source_pages = list(state.get('multi_model_pages', []))
+        source_infotexts = list(state.get('multi_model_infotexts', []))
+        pages = source_pages
+        infotexts = source_infotexts
+        if source_pages:
+            try:
+                pages, infotexts = self._build_multi_model_overview_pages(
+                    p,
+                    processed,
+                    state,
+                    source_pages,
+                    source_infotexts,
+                )
+                state['multi_model_overview_pages'] = list(pages)
+            except Exception as overview_error:
+                state['multi_model_overview_error'] = str(overview_error)
+                processed.comments += (
+                    "\nLoRA Tester: the shared multi-model grid could not be created; "
+                    "the completed per-model grids were retained."
+                )
+                print(
+                    "[LoRA Tester] Warning: shared multi-model grid creation failed: "
+                    f"{overview_error}"
+                )
+        if len(infotexts) < len(pages):
+            infotexts.extend(
+                [infotexts[0] if infotexts else ""]
+                * (len(pages) - len(infotexts))
+            )
+
+        processed.images = pages
+        processed.extra_images = []
+        if hasattr(p, 'extra_result_images'):
+            p.extra_result_images = []
+        processed.infotexts = infotexts
+        processed.index_of_first_image = len(pages)
+        prompt_values = list(state.get('multi_model_prompts', []))
+        negative_values = list(state.get('multi_model_negative_prompts', []))
+        seed_values = list(state.get('multi_model_seeds', []))
+        subseed_values = list(state.get('multi_model_subseeds', []))
+        processed.all_prompts = [
+            prompt_values[0] if prompt_values else str(p.prompt)
+        ] * len(pages)
+        processed.all_negative_prompts = [
+            negative_values[0] if negative_values else str(p.negative_prompt)
+        ] * len(pages)
+        processed.all_seeds = [
+            seed_values[0] if seed_values else state.get('fixed_seed', -1)
+        ] * len(pages)
+        processed.all_subseeds = [
+            subseed_values[0] if subseed_values else state.get('fixed_subseed', -1)
+        ] * len(pages)
+
+        failures = [
+            result
+            for result in state.get('model_results', [])
+            if result.get('status') != 'complete'
+        ]
+        interrupted = bool(
+            shared.state.interrupted or shared.state.stopping_generation
+        )
+        restore_error = state.get('original_model_restore_error')
+        overview_error = state.get('multi_model_overview_error')
+        if failures:
+            processed.comments += (
+                f"\nLoRA Tester: {len(failures)} model job(s) failed; "
+                "completed model pages were retained."
+            )
+        if interrupted:
+            processed.comments += (
+                "\nLoRA Tester: the multiple-model run was interrupted; "
+                "completed model pages were retained."
+            )
+        if restore_error:
+            processed.comments += (
+                "\nLoRA Tester: restoring the original Forge model failed: "
+                f"{restore_error}"
+            )
+
+        complete_count = sum(
+            result.get('status') == 'complete'
+            for result in state.get('model_results', [])
+        )
+        all_complete = (
+            complete_count == len(state.get('model_jobs', []))
+            and not failures
+            and not interrupted
+            and state.get('original_model_restored')
+            and not overview_error
+        )
+        final_status = (
+            "multi-model-complete" if all_complete else "multi-model-partial"
+        )
+        self._write_manifest(state, final_status)
+
+        manifest_path = state.get('manifest_path')
+        session_dir = Path(state['session_dir'])
+        if all_complete:
+            self._safe_unlink(manifest_path)
+            try:
+                session_dir.rmdir()
+            except OSError:
+                pass
+        else:
+            print(
+                f"[LoRA Tester] Multiple-model recovery manifest retained in "
+                f"{session_dir}"
+            )
+
+        print(
+            f"[LoRA Tester] Multiple-model run delivered {len(pages)} page(s) "
+            f"from {complete_count}/{len(state.get('model_jobs', []))} model(s)"
+        )
+        self._ensure_temp_directory()
+        setattr(p, self.PROCESSING_STATE_ATTRIBUTE, None)
+        gc.collect()
+
     def postprocess(self, p: StableDiffusionProcessing, processed: Processed,
                    lora_tester_enabled, test_type,
                    lora_selection, global_weight_spec,
@@ -3196,14 +3970,17 @@ class LoRaTesterScript(scripts.Script):
                    matrix_cols, matrix_margin,
                    output_retention,
                    unload_models_before_matrix,
-                   adaptive_ram, ram_budget, custom_ram_gb, minimum_free_ram_gb):
-        """Build RAM-aware matrix pages from the cells spooled during generation."""
+                   multi_model_mode=None, checkpoint_selection=None):
+        """Build safety-bounded matrix pages from disk-spooled generation cells."""
 
         state = getattr(p, self.PROCESSING_STATE_ATTRIBUTE, None)
         if not lora_tester_enabled or not state:
             return
 
-        monitor = state.get('ram_monitor')
+        if state.get('multi_model'):
+            self._postprocess_multi_model(p, processed, state)
+            return
+
         completed = False
         print(f"[LoRA Tester] Post-processing {len(state.get('cells', {}))} spooled cells")
 
@@ -3287,8 +4064,6 @@ class LoRaTesterScript(scripts.Script):
             # Every gallery entry is a matrix/grid page; there are no samples
             # after this index for Forge's single-image actions to target.
             processed.index_of_first_image = len(page_paths)
-            if state.get('ram_stop_reason'):
-                processed.comments += f"\nLoRA Tester: {state['ram_stop_reason']}"
             if retention_reason and not state.get('keep_individual_images'):
                 processed.comments += (
                     "\nLoRA Tester recovery: individual source images were retained "
@@ -3331,11 +4106,6 @@ class LoRaTesterScript(scripts.Script):
                 f"Temporary recovery files remain in {state['session_dir']}"
             )
         finally:
-            if monitor is not None:
-                monitor.stop()
-            ram_finalizer = state.get('ram_finalizer')
-            if ram_finalizer is not None and ram_finalizer.alive:
-                ram_finalizer.detach()
             self._ensure_temp_directory()
             setattr(p, self.PROCESSING_STATE_ATTRIBUTE, None)
             if not completed:
@@ -3878,16 +4648,12 @@ class LoRaTesterScript(scripts.Script):
         cell_width = max(int(cell['width']) for cell in cells)
         cell_height = max(int(cell['height']) for cell in cells)
         background = ImageColor.getcolor(shared.opts.grid_background_color, "RGB")
-        monitor = state.get('ram_monitor')
         rows = []
 
         for row_index, start in enumerate(range(0, len(cells), columns)):
             group = cells[start:start + columns]
             row_grid = None
             annotated_row = None
-            row_record = None
-            if monitor is not None:
-                monitor.begin_interval()
 
             try:
                 row_grid = Image.new("RGB", (cell_width * columns, cell_height), background)
@@ -3930,19 +4696,11 @@ class LoRaTesterScript(scripts.Script):
                     'width': int(annotated_row.width),
                     'height': int(annotated_row.height),
                     'cell_indices': [cell['index'] for cell in group],
-                    'peak_bytes': 0,
                 }
                 rows.append(row_record)
                 if track_as_matrix_rows:
                     state.setdefault('rows', []).append(row_record)
             finally:
-                row_peak = monitor.end_interval() if monitor is not None else 0
-                state['maximum_row_peak_bytes'] = max(
-                    state.get('maximum_row_peak_bytes', 0),
-                    row_peak,
-                )
-                if row_record is not None:
-                    row_record['peak_bytes'] = row_peak
                 if annotated_row is not None and annotated_row is not row_grid:
                     annotated_row.close()
                 if row_grid is not None:
@@ -3975,15 +4733,13 @@ class LoRaTesterScript(scripts.Script):
             return width, height, float('inf')
 
         # Four bytes per page pixel is deliberately conservative for an RGB PIL
-        # canvas. Add the measured/theoretical working row and PNG encoding room.
+        # canvas. Add theoretical working-row and PNG encoding room. This estimate
+        # is informational; fixed dimension and area limits determine page safety.
         canvas_bytes = width * height * 4
         largest_row_bytes = max(
             row['width'] * row['height'] * 4 for row in page_rows
         )
-        working_row = max(
-            state.get('maximum_row_peak_bytes', 0),
-            largest_row_bytes * 2,
-        )
+        working_row = largest_row_bytes * 2
         encoding_reserve = max(64 * MIB, int(canvas_bytes * 0.20))
         estimated_peak = int(canvas_bytes * self.PAGE_SAFETY_FACTOR + working_row + encoding_reserve)
         return width, height, estimated_peak
@@ -4025,8 +4781,6 @@ class LoRaTesterScript(scripts.Script):
             return [Path(page_path)]
 
         while row_offset < len(rows):
-            effective_available = self._effective_available(state)
-            page_budget = max(0, effective_available - state['minimum_free_bytes'])
             selected_rows = []
 
             for row in rows[row_offset:]:
@@ -4034,13 +4788,7 @@ class LoRaTesterScript(scripts.Script):
                 _, _, estimated_peak = self._estimate_page_peak(
                     state, candidate, reference_row
                 )
-                dimensions_safe = estimated_peak != float('inf')
-                fits_ram = dimensions_safe and (
-                    not state['adaptive_ram']
-                    or not effective_available
-                    or estimated_peak <= page_budget
-                )
-                if fits_ram:
+                if estimated_peak != float('inf'):
                     selected_rows = candidate
                     continue
                 break
@@ -4075,8 +4823,7 @@ class LoRaTesterScript(scripts.Script):
                 print(
                     f"[LoRA Tester] {output_description}, page {page_number}: "
                     "one-row disk fallback "
-                    "because the repeated reference or calculated RAM reserve would "
-                    "cross a page limit"
+                    "because the repeated reference would cross a page limit"
                 )
                 continue
 

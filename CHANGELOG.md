@@ -7,7 +7,42 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Added
+
+- Added an optional sequential multiple-model runner for exactly one selected LoRA
+  or for prompt-only comparison across up to 25 selected checkpoints normally and
+  up to 150 checkpoints in Extreme Run Mode.
+- Added an internal prompt-only/no-op LoRA case that reuses the fixed-seed,
+  disk-spooling, matrix, and recovery paths without loading a fake LoRA file.
+- Added an always-visible planned-run summary for item, cell, reference, checkpoint,
+  generation, and Standard/Extreme limit counts.
+
+### Changed
+
+- Kept the existing current-model LoRA and Embedding workflows as the default and
+  isolated multiple-model execution as an outer wrapper around complete Forge jobs.
+- Fully unload the checkpoint, text encoder, VAE, processing references, and loaded
+  LoRA registry after every model job, then restore the original Forge selection in
+  a `finally` path.
+- Stop before loading another checkpoint if the previous full unload cannot be
+  confirmed; retain completed outputs and still attempt original-model restoration.
+- Resolve the LoRA registry lazily during cleanup instead of importing it eagerly at
+  extension startup.
+- Combine completed per-model pages into one shared comparison grid instead of
+  returning one gallery grid per checkpoint; retain safety-driven page splitting.
+- Removed the disabled adaptive RAM watchdog, its read-only UI, background sampler,
+  Windows commit checks, callback parameters, and dormant manifest fields.
+- Replaced the nested Per-Item, Multiple models, and Advanced accordions with four
+  workflow tabs: Selection, Models & Run Size, Grid, and Output & Safety.
+
+### Safety
+
+- Persist per-model completion, failure, unload, and original-model restoration
+  status in the recovery manifest. Model-family preflight remains intentionally
+  deferred; Forge loading and generation errors are recorded per checkpoint.
+- Preserve disk-first spooling, full pre-matrix model unload, fixed cell limits,
+  65,000-pixel axis and 89,000,000-pixel page-area limits, multi-page composition,
+  and recovery-safe Matrix-only cleanup after removing the watchdog.
 
 ## [0.3.0-beta] - 2026-08-14
 
