@@ -2,14 +2,18 @@
 # Copyright (C) 2026 vibecodingtoolmaker
 
 import ast
+import copy
 import gc
 import json
 import os
+import sys
 import tempfile
 import unittest
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from types import SimpleNamespace
+from PIL import Image, ImageColor, PngImagePlugin
+from types import ModuleType, SimpleNamespace
+from unittest import mock
 
 
 SOURCE_PATH = Path(__file__).parents[1] / "scripts" / "lora_tester.py"
@@ -43,6 +47,10 @@ def load_class_methods(class_name, *method_names):
 
     module = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
     namespace = {
+        "copy": copy,
+        "Image": Image,
+        "ImageColor": ImageColor,
+        "PngImagePlugin": PngImagePlugin,
         "Path": Path,
         "json": json,
         "os": os,
@@ -51,6 +59,7 @@ def load_class_methods(class_name, *method_names):
         "gc": gc,
         "Decimal": Decimal,
         "InvalidOperation": InvalidOperation,
+        "StableDiffusionProcessing": object,
         "shared": SimpleNamespace(
             cmd_opts=SimpleNamespace(embeddings_dir="."),
             sd_model=None,
@@ -96,8 +105,21 @@ METHODS = load_methods(
     "_resolve_embedding_target",
     "_resolve_trigger_words",
     "_resolve_item_weights",
+    "_multi_model_request_error",
+    "_build_multi_model_overview_pages",
+    "_multi_model_page_geometry",
+    "_prepare_multi_model_job_arguments",
+    "_postprocess_multi_model",
+    "_run_multi_model_jobs",
+    "_split_multi_model_overview_records",
+    "_suppress_multi_model_coordinator_batch",
+    "before_process_batch",
+    "_release_processing_references",
+    "_restore_forge_model_state",
+    "_save_png_atomic",
     "_safe_filename_part",
     "_safe_unlink",
+    "_validate_matrix_pages",
     "_write_manifest",
     "_cleanup_spool_files",
 )
@@ -125,6 +147,37 @@ RecoveryHarness._resolve_embedding_target = classmethod(
     METHODS["_resolve_embedding_target"]
 )
 RecoveryHarness._resolve_item_weights = classmethod(METHODS["_resolve_item_weights"])
+RecoveryHarness._multi_model_request_error = classmethod(
+    METHODS["_multi_model_request_error"]
+)
+RecoveryHarness._build_multi_model_overview_pages = METHODS[
+    "_build_multi_model_overview_pages"
+]
+RecoveryHarness._multi_model_page_geometry = classmethod(
+    METHODS["_multi_model_page_geometry"]
+)
+RecoveryHarness._prepare_multi_model_job_arguments = classmethod(
+    METHODS["_prepare_multi_model_job_arguments"]
+)
+RecoveryHarness._postprocess_multi_model = METHODS["_postprocess_multi_model"]
+RecoveryHarness._run_multi_model_jobs = METHODS["_run_multi_model_jobs"]
+RecoveryHarness._split_multi_model_overview_records = classmethod(
+    METHODS["_split_multi_model_overview_records"]
+)
+RecoveryHarness._suppress_multi_model_coordinator_batch = staticmethod(
+    METHODS["_suppress_multi_model_coordinator_batch"]
+)
+RecoveryHarness.before_process_batch = METHODS["before_process_batch"]
+RecoveryHarness._release_processing_references = staticmethod(
+    METHODS["_release_processing_references"]
+)
+RecoveryHarness._restore_forge_model_state = classmethod(
+    METHODS["_restore_forge_model_state"]
+)
+RecoveryHarness._save_png_atomic = staticmethod(METHODS["_save_png_atomic"])
+RecoveryHarness._validate_matrix_pages = staticmethod(
+    METHODS["_validate_matrix_pages"]
+)
 RecoveryHarness._compose_embedding_prompt = staticmethod(
     METHODS["_compose_embedding_prompt"]
 )
@@ -157,7 +210,6 @@ RecoveryHarness._comparison_capacity = classmethod(METHODS["_comparison_capacity
 RecoveryHarness._comparison_range_hint = classmethod(
     METHODS["_comparison_range_hint"]
 )
-RecoveryHarness._effective_available = staticmethod(lambda state: 0)
 RecoveryHarness.MAX_TOTAL_CASES = 500
 RecoveryHarness.MAX_EXTREME_TOTAL_CASES = 10_000
 RecoveryHarness.MAX_WEIGHTS_PER_ITEM = 100
@@ -174,6 +226,635 @@ RecoveryHarness.MAX_COMPARISON_ITEMS = 10
 RecoveryHarness.DEFAULT_COMPARISON_STEP = Decimal("0.5")
 RecoveryHarness.EMBEDDING_TARGET_POSITIVE = "Positive prompt"
 RecoveryHarness.EMBEDDING_TARGET_NEGATIVE = "Negative prompt"
+RecoveryHarness.TEST_TYPE_LORA = "LoRA"
+RecoveryHarness.TEST_TYPE_EMBEDDING = "Embedding"
+RecoveryHarness.TEST_TYPE_PROMPT = "Prompt only (internal)"
+RecoveryHarness.MULTI_MODEL_CURRENT = "Current model only (existing behavior)"
+RecoveryHarness.MULTI_MODEL_LORA = "One LoRA across selected models"
+RecoveryHarness.MULTI_MODEL_PROMPT = "Prompt only across selected models"
+RecoveryHarness.MAX_MULTI_MODEL_CHECKPOINTS = 25
+RecoveryHarness.MAX_EXTREME_MULTI_MODEL_CHECKPOINTS = 150
+RecoveryHarness.PROMPT_ONLY_SENTINEL = "__lora_tester_prompt_only__"
+RecoveryHarness.BATCH_MODEL_LABEL_ATTRIBUTE = "_lora_tester_batch_model_label"
+RecoveryHarness.PROCESSING_STATE_ATTRIBUTE = "_lora_tester_state"
+
+
+class MultiModelPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = RecoveryHarness()
+
+    def test_existing_single_model_mode_keeps_selection_contract_unchanged(self):
+        error = self.harness._multi_model_request_error(
+            self.harness.MULTI_MODEL_CURRENT,
+            [],
+            self.harness.TEST_TYPE_EMBEDDING,
+            [],
+        )
+
+        self.assertIsNone(error)
+
+    def test_one_lora_mode_requires_models_and_exactly_one_lora(self):
+        self.assertIn(
+            "at least one checkpoint",
+            self.harness._multi_model_request_error(
+                self.harness.MULTI_MODEL_LORA,
+                [],
+                self.harness.TEST_TYPE_LORA,
+                ["one.safetensors"],
+            ),
+        )
+        self.assertIn(
+            "exactly one selected LoRA",
+            self.harness._multi_model_request_error(
+                self.harness.MULTI_MODEL_LORA,
+                ["model-a.safetensors"],
+                self.harness.TEST_TYPE_LORA,
+                ["one.safetensors", "two.safetensors"],
+            ),
+        )
+        self.assertIsNone(
+            self.harness._multi_model_request_error(
+                self.harness.MULTI_MODEL_LORA,
+                ["model-a.safetensors", "model-b.safetensors"],
+                self.harness.TEST_TYPE_LORA,
+                ["one.safetensors"],
+            )
+        )
+
+    def test_prompt_only_mode_needs_no_real_lora(self):
+        self.assertIsNone(
+            self.harness._multi_model_request_error(
+                self.harness.MULTI_MODEL_PROMPT,
+                ["model-a.safetensors"],
+                self.harness.TEST_TYPE_EMBEDDING,
+                [],
+            )
+        )
+
+    def test_standard_multi_model_limit_is_twenty_five(self):
+        self.assertIsNone(
+            self.harness._multi_model_request_error(
+                self.harness.MULTI_MODEL_PROMPT,
+                [f"model-{index}" for index in range(25)],
+                self.harness.TEST_TYPE_LORA,
+                [],
+            )
+        )
+        error = self.harness._multi_model_request_error(
+            self.harness.MULTI_MODEL_PROMPT,
+            [f"model-{index}" for index in range(26)],
+            self.harness.TEST_TYPE_LORA,
+            [],
+        )
+
+        self.assertIn("at most 25 checkpoints", error)
+        self.assertIn("Extreme Run Mode", error)
+        self.assertIn("150 checkpoints", error)
+
+    def test_extreme_multi_model_limit_is_one_hundred_fifty(self):
+        self.assertIsNone(
+            self.harness._multi_model_request_error(
+                self.harness.MULTI_MODEL_PROMPT,
+                [f"model-{index}" for index in range(150)],
+                self.harness.TEST_TYPE_LORA,
+                [],
+                extreme_run_mode=True,
+            )
+        )
+        error = self.harness._multi_model_request_error(
+            self.harness.MULTI_MODEL_PROMPT,
+            [f"model-{index}" for index in range(151)],
+            self.harness.TEST_TYPE_LORA,
+            [],
+            extreme_run_mode=True,
+        )
+
+        self.assertIn("at most 150 checkpoints", error)
+
+    def test_safe_model_pages_share_one_overview_grid(self):
+        records = [
+            {"path": "model-a.png", "width": 1024, "height": 1112},
+            {"path": "model-b.png", "width": 1024, "height": 1112},
+        ]
+
+        chunks = self.harness._split_multi_model_overview_records(
+            records,
+            requested_columns=3,
+            margin=8,
+        )
+        geometry = self.harness._multi_model_page_geometry(
+            chunks[0],
+            requested_columns=3,
+            margin=8,
+        )
+
+        self.assertEqual(chunks, [records])
+        self.assertEqual(geometry["columns"], 2)
+        self.assertEqual(geometry["rows"], 1)
+        self.assertEqual(geometry["width"], 2056)
+        self.assertEqual(geometry["height"], 1112)
+
+    def test_multi_model_overview_splits_only_at_matrix_safety_limit(self):
+        records = [
+            {"path": f"model-{index}.png", "width": 30_000, "height": 1_000}
+            for index in range(3)
+        ]
+
+        chunks = self.harness._split_multi_model_overview_records(
+            records,
+            requested_columns=3,
+            margin=8,
+        )
+
+        self.assertEqual([len(chunk) for chunk in chunks], [2, 1])
+
+    def test_multi_model_overview_writes_both_model_pages_to_one_png(self):
+        shared_stub = METHODS["_build_multi_model_overview_pages"].__globals__["shared"]
+        shared_stub.opts = SimpleNamespace(
+            grid_background_color="#000000",
+            grid_save=False,
+            enable_pnginfo=True,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            temporary_root = Path(temporary_root)
+            first = temporary_root / "model-a.png"
+            second = temporary_root / "model-b.png"
+            Image.new("RGB", (64, 32), (255, 0, 0)).save(first)
+            Image.new("RGB", (64, 32), (0, 0, 255)).save(second)
+            state = {
+                "session_dir": str(temporary_root),
+                "matrix_cols": 3,
+                "matrix_margin": 8,
+                "fixed_seed": 42,
+                "model_results": [
+                    {"label": "A", "status": "complete"},
+                    {"label": "B", "status": "complete"},
+                ],
+            }
+            processing = SimpleNamespace(
+                prompt="prompt",
+                outpath_grids=str(temporary_root),
+            )
+            processed = SimpleNamespace(all_seeds=[42], all_prompts=["prompt"])
+
+            pages, infotexts = self.harness._build_multi_model_overview_pages(
+                processing,
+                processed,
+                state,
+                [str(first), str(second)],
+                ["grid info A", "grid info B"],
+            )
+
+            self.assertEqual(len(pages), 1)
+            self.assertEqual(len(infotexts), 1)
+            with Image.open(pages[0]) as overview:
+                self.assertEqual(overview.size, (136, 32))
+                self.assertEqual(overview.getpixel((0, 0)), (255, 0, 0))
+                self.assertEqual(overview.getpixel((72, 0)), (0, 0, 255))
+
+    def test_nested_prompt_job_uses_noop_case_and_disables_recursion(self):
+        arguments = [None] * 23
+        arguments[0] = True
+        arguments[1] = self.harness.TEST_TYPE_LORA
+        arguments[2] = ["real-lora.safetensors"]
+        arguments[11] = True
+        arguments[-2] = self.harness.MULTI_MODEL_PROMPT
+        arguments[-1] = ["model-a.safetensors"]
+
+        nested = self.harness._prepare_multi_model_job_arguments(
+            arguments,
+            self.harness.MULTI_MODEL_PROMPT,
+        )
+
+        self.assertEqual(nested[1], self.harness.TEST_TYPE_PROMPT)
+        self.assertEqual(nested[2], [self.harness.PROMPT_ONLY_SENTINEL])
+        self.assertFalse(nested[11])
+        self.assertEqual(nested[-2], self.harness.MULTI_MODEL_CURRENT)
+        self.assertEqual(nested[-1], [])
+        self.assertEqual(arguments[-2], self.harness.MULTI_MODEL_PROMPT)
+
+    def test_prompt_case_is_not_mistaken_for_reference_baseline(self):
+        self.assertFalse(
+            self.harness._case_is_baseline(
+                {
+                    "kind": "prompt",
+                    "lora_tag_name": None,
+                    "embedding_name": None,
+                }
+            )
+        )
+
+    def test_outer_coordinator_batch_is_stopped_before_case_injection(self):
+        state = {
+            "multi_model": True,
+            # Coordinator cases deliberately do not carry LoRA injection fields.
+            "cases": [{"kind": "model", "label": "Model A"}],
+        }
+        processing = SimpleNamespace(_lora_tester_state=state)
+        prompts = ["prompt that must not be sampled"]
+
+        self.harness.before_process_batch(
+            processing,
+            True,
+            batch_number=0,
+            prompts=prompts,
+            seeds=[42],
+            subseeds=[7],
+        )
+
+        self.assertEqual(prompts, [])
+        self.assertTrue(state["outer_sampling_suppressed"])
+
+    def test_outer_job_delivers_one_combined_grid_for_multiple_models(self):
+        shared_stub = METHODS["_postprocess_multi_model"].__globals__["shared"]
+        shared_stub.state = SimpleNamespace(
+            interrupted=False,
+            stopping_generation=False,
+        )
+        self.harness._build_multi_model_overview_pages = (
+            lambda p, processed, state, pages, infotexts: (
+                ["combined-grid.png"],
+                ["combined grid info"],
+            )
+        )
+        self.harness._write_manifest = lambda state, status: None
+        self.harness._safe_unlink = lambda path: True
+        self.harness._ensure_temp_directory = lambda: None
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            state = {
+                "multi_model_pages": ["model-a.png", "model-b.png"],
+                "multi_model_infotexts": ["A", "B"],
+                "multi_model_prompts": ["prompt", "prompt"],
+                "multi_model_negative_prompts": ["negative", "negative"],
+                "multi_model_seeds": [42, 42],
+                "multi_model_subseeds": [7, 7],
+                "model_jobs": [{"label": "A"}, {"label": "B"}],
+                "model_results": [
+                    {"label": "A", "status": "complete"},
+                    {"label": "B", "status": "complete"},
+                ],
+                "original_model_restored": True,
+                "session_dir": temporary_root,
+                "manifest_path": None,
+            }
+            processing = SimpleNamespace(
+                _lora_tester_state=state,
+                prompt="prompt",
+                negative_prompt="negative",
+                extra_result_images=["old"],
+            )
+            processed = SimpleNamespace(
+                images=[],
+                extra_images=["old"],
+                infotexts=[],
+                all_prompts=[],
+                all_negative_prompts=[],
+                all_seeds=[],
+                all_subseeds=[],
+                comments="",
+                index_of_first_image=0,
+            )
+
+            self.harness._postprocess_multi_model(processing, processed, state)
+
+        self.assertEqual(processed.images, ["combined-grid.png"])
+        self.assertEqual(processed.infotexts, ["combined grid info"])
+        self.assertEqual(processed.all_prompts, ["prompt"])
+        self.assertEqual(processed.all_seeds, [42])
+        self.assertEqual(processing.extra_result_images, [])
+
+    def test_multi_model_manifest_records_jobs_results_and_restore_status(self):
+        with tempfile.TemporaryDirectory() as temporary_root:
+            manifest = Path(temporary_root) / "manifest.json"
+            state = {
+                "manifest_path": str(manifest),
+                "multi_model": True,
+                "multi_model_mode": self.harness.MULTI_MODEL_PROMPT,
+                "model_jobs": [{"label": "A", "checkpoint": "a.safetensors"}],
+                "model_results": [
+                    {
+                        "label": "A",
+                        "checkpoint": "a.safetensors",
+                        "status": "complete",
+                        "pages": ["a.png"],
+                    }
+                ],
+                "original_checkpoint": "original.safetensors",
+                "original_model_restored": True,
+                "cases": [{}],
+                "cells": {},
+            }
+
+            self.harness._write_manifest(state, "multi-model-complete")
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+        self.assertTrue(payload["multi_model"])
+        self.assertEqual(payload["model_jobs"][0]["label"], "A")
+        self.assertEqual(payload["model_results"][0]["status"], "complete")
+        self.assertTrue(payload["original_model_restored"])
+
+    def test_model_boundary_releases_processing_references(self):
+        class ProcessingStub:
+            cached_hr_c = [1, 2, 3]
+            cached_hr_uc = [1, 2, 3]
+
+            def __init__(self):
+                self.closed = False
+                self.prompt_cache_cleared = False
+                self.c = object()
+                self.uc = object()
+                self.sampler = object()
+                self.rng = object()
+                self.modified_noise = object()
+                self.hr_c = object()
+                self.hr_uc = object()
+
+            def close(self):
+                self.closed = True
+
+            def clear_prompt_cache(self):
+                self.prompt_cache_cleared = True
+
+        processing = ProcessingStub()
+
+        self.harness._release_processing_references(processing)
+
+        self.assertTrue(processing.closed)
+        self.assertTrue(processing.prompt_cache_cleared)
+        for attribute in (
+            "c",
+            "uc",
+            "sampler",
+            "rng",
+            "modified_noise",
+            "hr_c",
+            "hr_uc",
+        ):
+            self.assertIsNone(getattr(processing, attribute))
+        self.assertEqual(ProcessingStub.cached_hr_c, [None, None, None])
+        self.assertEqual(ProcessingStub.cached_hr_uc, [None, None, None])
+
+    def test_restore_path_reinstates_selection_and_loading_parameters(self):
+        events = []
+        fake_processing = SimpleNamespace(need_global_unload=False)
+
+        def manage_model_and_prompt_cache(p):
+            events.append(("manage", p, fake_processing.need_global_unload))
+
+        fake_processing.manage_model_and_prompt_cache = manage_model_and_prompt_cache
+        fake_sd_models = SimpleNamespace(
+            model_data=SimpleNamespace(forge_loading_parameters={"changed": True})
+        )
+        fake_modules = ModuleType("modules")
+        fake_modules.processing = fake_processing
+        fake_modules.sd_models = fake_sd_models
+        fake_sysinfo = ModuleType("modules.sysinfo")
+
+        def set_config(settings, **kwargs):
+            events.append(("settings", settings, kwargs))
+
+        fake_sysinfo.set_config = set_config
+        snapshot = {
+            "checkpoint": "original.safetensors",
+            "additional_modules": ["vae.safetensors"],
+            "loading_parameters": {
+                "checkpoint_info": "original-info",
+                "additional_modules": ["vae.safetensors"],
+                "unet_storage_dtype": "bf16",
+            },
+        }
+        processing = object()
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "modules": fake_modules,
+                "modules.sysinfo": fake_sysinfo,
+            },
+        ):
+            self.harness._restore_forge_model_state(processing, snapshot)
+
+        self.assertEqual(
+            events[0][1],
+            {
+                "sd_model_checkpoint": "original.safetensors",
+                "forge_additional_modules": ["vae.safetensors"],
+            },
+        )
+        self.assertEqual(
+            fake_sd_models.model_data.forge_loading_parameters,
+            snapshot["loading_parameters"],
+        )
+        self.assertEqual(events[1], ("manage", processing, True))
+
+    def test_model_jobs_unload_between_loads_then_restore_original_selection(self):
+        events = []
+        shared_stub = METHODS["_run_multi_model_jobs"].__globals__["shared"]
+        shared_stub.state = SimpleNamespace(
+            interrupted=False,
+            stopping_generation=False,
+            job="",
+        )
+        fake_processing = ModuleType("modules.processing")
+
+        def process_images(job_p):
+            checkpoint = job_p.override_settings["sd_model_checkpoint"]
+            events.append(("run", checkpoint))
+            return SimpleNamespace(
+                images=[f"{checkpoint}.png"],
+                infotexts=[checkpoint],
+                all_prompts=["prompt"],
+                all_negative_prompts=["negative"],
+                all_seeds=[42],
+                all_subseeds=[7],
+            )
+
+        fake_processing.process_images = process_images
+        fake_modules = ModuleType("modules")
+        fake_modules.processing = fake_processing
+
+        self.harness.args_from = 0
+        self.harness.args_to = 23
+        self.harness._snapshot_forge_model_state = lambda: {
+            "checkpoint": "original.safetensors"
+        }
+        self.harness._persist_multi_model_outputs = (
+            lambda state, job, processed: (
+                list(processed.images),
+                list(processed.infotexts),
+            )
+        )
+        self.harness._full_forge_model_unload = lambda job_p: events.append(
+            ("unload", job_p.override_settings["sd_model_checkpoint"])
+        )
+        self.harness._restore_forge_model_state = lambda p, snapshot: events.append(
+            ("restore", snapshot["checkpoint"])
+        )
+        self.harness._write_manifest = lambda state, status: None
+
+        processing = SimpleNamespace(
+            all_seeds=[42],
+            seed=42,
+            all_subseeds=[7],
+            subseed=7,
+            styles=[],
+            override_settings={},
+            script_args=[None] * 23,
+            prompt="prompt",
+            negative_prompt="negative",
+            n_iter=1,
+            batch_size=1,
+        )
+        state = {
+            "multi_model_mode": self.harness.MULTI_MODEL_PROMPT,
+            "model_jobs": [
+                {
+                    "checkpoint": "a.safetensors",
+                    "title": "A",
+                    "label": "A",
+                },
+                {
+                    "checkpoint": "b.safetensors",
+                    "title": "B",
+                    "label": "B",
+                },
+            ],
+            "model_results": [],
+            "multi_model_pages": [],
+            "multi_model_infotexts": [],
+            "multi_model_prompts": [],
+            "multi_model_negative_prompts": [],
+            "multi_model_seeds": [],
+            "multi_model_subseeds": [],
+        }
+        arguments = [None] * 23
+
+        with mock.patch.dict(sys.modules, {"modules": fake_modules}):
+            self.harness._run_multi_model_jobs(
+                processing,
+                state,
+                arguments,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                ("run", "a.safetensors"),
+                ("unload", "a.safetensors"),
+                ("run", "b.safetensors"),
+                ("unload", "b.safetensors"),
+                ("restore", "original.safetensors"),
+            ],
+        )
+        self.assertTrue(state["original_model_restored"])
+        self.assertEqual([result["status"] for result in state["model_results"]], ["complete", "complete"])
+        self.assertEqual(processing.n_iter, 0)
+
+    def test_failed_unload_stops_before_next_model_and_still_restores(self):
+        events = []
+        shared_stub = METHODS["_run_multi_model_jobs"].__globals__["shared"]
+        shared_stub.state = SimpleNamespace(
+            interrupted=False,
+            stopping_generation=False,
+            job="",
+        )
+        fake_processing = ModuleType("modules.processing")
+
+        def process_images(job_p):
+            checkpoint = job_p.override_settings["sd_model_checkpoint"]
+            events.append(("run", checkpoint))
+            return SimpleNamespace(
+                images=[f"{checkpoint}.png"],
+                infotexts=[checkpoint],
+                all_prompts=["prompt"],
+                all_negative_prompts=["negative"],
+                all_seeds=[42],
+                all_subseeds=[7],
+            )
+
+        fake_processing.process_images = process_images
+        fake_modules = ModuleType("modules")
+        fake_modules.processing = fake_processing
+
+        self.harness.args_from = 0
+        self.harness.args_to = 23
+        self.harness._snapshot_forge_model_state = lambda: {
+            "checkpoint": "original.safetensors"
+        }
+        self.harness._persist_multi_model_outputs = (
+            lambda state, job, processed: (
+                list(processed.images),
+                list(processed.infotexts),
+            )
+        )
+
+        def fail_unload(job_p):
+            checkpoint = job_p.override_settings["sd_model_checkpoint"]
+            events.append(("unload", checkpoint))
+            raise RuntimeError("unload failed")
+
+        self.harness._full_forge_model_unload = fail_unload
+        self.harness._restore_forge_model_state = lambda p, snapshot: events.append(
+            ("restore", snapshot["checkpoint"])
+        )
+        self.harness._write_manifest = lambda state, status: None
+
+        processing = SimpleNamespace(
+            all_seeds=[42],
+            seed=42,
+            all_subseeds=[7],
+            subseed=7,
+            styles=[],
+            override_settings={},
+            script_args=[None] * 23,
+            prompt="prompt",
+            negative_prompt="negative",
+            n_iter=1,
+            batch_size=1,
+        )
+        state = {
+            "multi_model_mode": self.harness.MULTI_MODEL_PROMPT,
+            "model_jobs": [
+                {
+                    "checkpoint": "a.safetensors",
+                    "title": "A",
+                    "label": "A",
+                },
+                {
+                    "checkpoint": "b.safetensors",
+                    "title": "B",
+                    "label": "B",
+                },
+            ],
+            "model_results": [],
+            "multi_model_pages": [],
+            "multi_model_infotexts": [],
+            "multi_model_prompts": [],
+            "multi_model_negative_prompts": [],
+            "multi_model_seeds": [],
+            "multi_model_subseeds": [],
+        }
+
+        with mock.patch.dict(sys.modules, {"modules": fake_modules}):
+            self.harness._run_multi_model_jobs(
+                processing,
+                state,
+                [None] * 23,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                ("run", "a.safetensors"),
+                ("unload", "a.safetensors"),
+                ("restore", "original.safetensors"),
+            ],
+        )
+        self.assertEqual(state["model_results"][0]["status"], "unload-failed")
+        self.assertFalse(state["model_results"][0]["unloaded"])
+        self.assertTrue(state["original_model_restored"])
 
 
 class MatrixOnlyRecoveryTests(unittest.TestCase):
@@ -182,7 +863,7 @@ class MatrixOnlyRecoveryTests(unittest.TestCase):
         self.harness.cached_embeddings = {}
 
     def test_cleanup_decision_requires_every_cell_and_no_interrupt(self):
-        state = {"cases": [{}, {}, {}], "ram_stop_reason": None}
+        state = {"cases": [{}, {}, {}]}
 
         self.assertEqual(
             self.harness._matrix_only_cleanup_decision(state, 3, False),
@@ -264,7 +945,7 @@ class ExtremeRunAndMatrixLayoutTests(unittest.TestCase):
         self.assertEqual(self.harness._maximum_total_cases(True), 10_000)
 
     def test_reference_row_is_included_in_every_page_estimate(self):
-        state = {"matrix_margin": 5, "maximum_row_peak_bytes": 0}
+        state = {"matrix_margin": 5}
         reference_row = {"width": 832, "height": 1_300}
         rows = [
             {"width": 3_328, "height": 1_400},
@@ -282,7 +963,7 @@ class ExtremeRunAndMatrixLayoutTests(unittest.TestCase):
         self.assertGreater(estimated_peak, 0)
 
     def test_sixty_five_thousand_pixel_page_limit_is_enforced(self):
-        state = {"matrix_margin": 5, "maximum_row_peak_bytes": 0}
+        state = {"matrix_margin": 5}
         reference_row = {"width": 832, "height": 1_300}
         rows = [{"width": 3_328, "height": 64_000}]
 
@@ -296,7 +977,7 @@ class ExtremeRunAndMatrixLayoutTests(unittest.TestCase):
         self.assertEqual(estimated_peak, float("inf"))
 
     def test_pillow_gallery_pixel_area_limit_is_enforced(self):
-        state = {"matrix_margin": 0, "maximum_row_peak_bytes": 0}
+        state = {"matrix_margin": 0}
         rows = [{"width": 3_082, "height": 63_904}]
 
         width, height, estimated_peak = self.harness._estimate_page_peak(
@@ -312,9 +993,6 @@ class ExtremeRunAndMatrixLayoutTests(unittest.TestCase):
     def test_reference_row_is_passed_to_every_composed_page(self):
         state = {
             "matrix_margin": 0,
-            "maximum_row_peak_bytes": 0,
-            "adaptive_ram": False,
-            "minimum_free_bytes": 0,
         }
         reference_row = {"path": "reference.png", "width": 832, "height": 1_000}
         rows = [
@@ -354,9 +1032,6 @@ class ExtremeRunAndMatrixLayoutTests(unittest.TestCase):
     def test_pixel_area_limit_splits_pages_before_gradio_reopens_them(self):
         state = {
             "matrix_margin": 0,
-            "maximum_row_peak_bytes": 0,
-            "adaptive_ram": False,
-            "minimum_free_bytes": 0,
         }
         reference_row = {"path": "reference.png", "width": 3_082, "height": 1_000}
         rows = [
@@ -1131,6 +1806,19 @@ class EmbeddingCompatibilityTests(unittest.TestCase):
 
 
 class UiCallbackContractTests(unittest.TestCase):
+    def test_removed_ram_watchdog_is_absent_from_runtime_source(self):
+        source = SOURCE_PATH.read_text(encoding="utf-8")
+
+        for removed_symbol in (
+            "RamMonitor",
+            "RAM_WATCHDOG_ENABLED",
+            "psutil",
+            "adaptive_ram",
+            "ram_budget",
+            "minimum_free_ram_gb",
+        ):
+            self.assertNotIn(removed_symbol, source)
+
     def test_ui_component_order_matches_processing_callback_signatures(self):
         tree = ast.parse(SOURCE_PATH.read_text(encoding="utf-8"))
         script_class = next(

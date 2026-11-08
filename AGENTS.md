@@ -68,8 +68,9 @@ These instructions apply to the entire Forge Neo LoRA Tester repository.
   a separate row on every successful matrix page without reordering comparison cells.
 - Keep checkpoint/text-encoder/VAE unload enabled by default. Use Forge's full
   checkpoint unload path rather than a VRAM-only eviction.
-- `RAM_WATCHDOG_ENABLED` must remain `False` until the maintainer explicitly approves
-  reactivation after cross-system validation.
+- The former adaptive RAM watchdog was removed. Do not reintroduce system-memory
+  polling or adaptive cell stops without explicit maintainer approval and
+  cross-system validation.
 - The existing startup LoRA warning is an open eager-import bug. Fix it by lazy
   resolution at unload time; do not replace it with a new startup LoRA scan.
 

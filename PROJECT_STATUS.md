@@ -1,6 +1,6 @@
 # Forge Neo LoRA Tester – Project Status
 
-Last updated: 2026-08-14
+Last updated: 2026-11-08
 
 Repository: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester
 
@@ -22,6 +22,55 @@ then this document, `README.md`, and the current Git diff before changing code.
 - `main` intentionally contains only the public extension package. The test suite
   is intentionally retained on `develop` and omitted from `main`.
 - License: `AGPL-3.0-only`; copyright holder: `vibecodingtoolmaker`.
+
+## Development progress — 2026-11-08
+
+The first one-LoRA/prompt-only multiple-checkpoint implementation is now present
+locally on `develop` and remains uncommitted.
+
+Implemented:
+
+- The existing current-model LoRA/Embedding tester remains the default path.
+- A new outer runner accepts exactly one LoRA or a prompt-only no-op case and up to
+  25 selected checkpoints normally or 150 in Extreme Run Mode.
+- Every checkpoint is executed through a fresh complete Forge `process_images()` job;
+  checkpoints are not switched inside one initialized sampling loop.
+- The first resolved seed/subseed and the existing prompt, sampler, resolution, and
+  weight range are reused for every checkpoint job.
+- Completed per-model matrix pages are retained immediately and then assembled into
+  one shared comparison overview unless the matrix safety limits require page
+  splitting. Model load/generation failures, unload results, and original-model
+  restoration are recorded in the recovery manifest.
+- Processing references and Forge's complete checkpoint/text-encoder/VAE state are
+  unloaded after every checkpoint, and the original checkpoint plus additional
+  modules are restored in `finally`.
+- A failed full unload stops the sequence before another model is loaded; completed
+  outputs are retained and original-model restoration is still attempted.
+- Prompt-only uses an internal no-op case rather than a real empty LoRA file.
+- Model-family metadata/structure preflight is intentionally deferred as requested.
+- The disabled adaptive RAM watchdog, its read-only UI, `psutil` sampler, Windows
+  commit checks, callback parameters, and dormant manifest fields have been removed.
+  Disk spooling, full model unload, fixed run limits, static page limits, multi-page
+  composition, and recovery-safe cleanup remain active.
+
+Verified in this development pass:
+
+- 61 unit tests pass in Forge's Python environment, including the simplified UI
+  callback contract, explicit watchdog-removal guard, run-plan validation,
+  prompt-only recursion guard, manifest
+  fields, strict run/unload ordering, unload-failure abort, processing-reference
+  release, restoration input/state handoff, shared-grid aggregation, and real PNG
+  composition for multiple model pages.
+- Production syntax, Ruff fatal-error checks, and `git diff --check` pass.
+
+Not yet proven:
+
+- The maintainer confirmed restarted-Forge multi-model loading and shared-grid delivery
+  with the tested model pair. The 25-checkpoint standard boundary and any 150-model
+  Extreme run remain intentionally unproven in live Forge.
+- Remaining live gates include one-LoRA same-family checkpoints, repeated unload/reload,
+  interruption/failure retention, original-model restoration, img2img, and finally
+  focused KREA and MOSS runs.
 
 ## Release completion — 2026-08-14
 
@@ -85,10 +134,10 @@ then this document, `README.md`, and the current Git diff before changing code.
    practical.
 4. Record these as live Forge results. Automated/unit/browser checks must not be used
    as substitutes for the missing generation evidence.
-5. After the release smoke is satisfactory, continue the one-LoRA/up-to-ten-checkpoint
-   scaffold already specified below. Preserve Forge-owned model loading, runtime LoRA
-   key mapping as final compatibility authority, disk-first persistence, and
-   unconditional restoration of the original model selection.
+5. After the release smoke is satisfactory, continue the one-LoRA/multiple-checkpoint
+   scaffold, with 25 standard or 150 Extreme checkpoints. Preserve Forge-owned model
+   loading, runtime LoRA key mapping as final compatibility authority, disk-first
+   persistence, and unconditional restoration of the original model selection.
 
 ### Resume commands
 
@@ -242,8 +291,9 @@ git diff --check
 
 ### Tomorrow's primary task: one LoRA across multiple checkpoints
 
-Build the first scaffold around exactly one selected LoRA and up to ten selected
-checkpoints. The existing weight parser remains the shared axis, including ranges such
+The original scaffold targeted exactly one selected LoRA and ten selected checkpoints;
+the implemented limits are now 25 normally and 150 in Extreme Run Mode. The existing
+weight parser remains the shared axis, including ranges such
 as `-5:5:0.5` (21 weights). Every checkpoint must receive the same prompt, resolved
 seed, sampler, resolution, and exact weight sequence.
 
@@ -277,12 +327,13 @@ Compatibility should be layered:
   `extensions-builtin/sd_forge_lora/networks.py` (loaded-model key matching). Keep all
   new implementation inside this extension.
 
-The target 10-checkpoint by 21-weight overview cannot generally remain full resolution:
-at typical source sizes it exceeds the existing 89M-pixel Gallery boundary before
-labels are added. Keep full-resolution per-checkpoint rows, then design a downscaled
-overview (and later possibly tiled/zoomable output) without weakening the 65,000-axis,
-89M-area, disk-first, or recovery guarantees. Multiple LoRAs across multiple
-checkpoints is the next expansion after this one-LoRA scaffold is stable.
+Even the 25-checkpoint standard limit with 21 weights cannot generally remain full
+resolution; the 150-checkpoint Extreme limit makes splitting still more important. At
+typical source sizes the overview exceeds the existing 89M-pixel Gallery boundary
+before labels are added. Keep full-resolution per-checkpoint rows, then design a
+downscaled overview (and later possibly tiled/zoomable output) without weakening the
+65,000-axis, 89M-area, disk-first, or recovery guarantees. Multiple LoRAs across
+multiple checkpoints is the next expansion after this one-LoRA scaffold is stable.
 
 ## Changes implemented on 2026-08-05
 
@@ -389,8 +440,8 @@ checkpoints is the next expansion after this one-LoRA scaffold is stable.
 ## Planned feature roadmap
 
 1. **LoRAs across multiple checkpoints**
-   - First scaffold: exactly one LoRA, up to ten checkpoints, and one identical user
-     weight sequence per checkpoint.
+   - First scaffold: exactly one LoRA, up to 25 checkpoints normally or 150 in Extreme
+     Run Mode, and one identical user weight sequence per checkpoint.
    - Load each checkpoint once and create one horizontal weight row per checkpoint.
    - Combined layout: checkpoints on the Y axis and weights on the X axis; retain
      full-resolution per-checkpoint rows even when the combined overview must be
@@ -434,9 +485,10 @@ retain sources plus the manifest.
 `_estimate_page_peak()` rejects pages exceeding 65,000 pixels on either axis or
 89,000,000 total pixels. The area ceiling stays below Pillow's default large-image
 warning threshold because Gradio reopens returned Gallery files after matrix creation.
-`_build_matrix_pages()` adds rows until the next row would cross a layout limit or,
-if the experimental RAM system is later enabled, the calculated memory budget.
-Splitting is expected behavior and not an OOM indication.
+`_build_matrix_pages()` adds rows until the next row would cross one of those static
+layout limits. The conservative byte estimate remains informational; it no longer
+polls system memory or changes page packing. Splitting is expected behavior and not
+an OOM indication.
 
 ### Repeated reference
 
@@ -452,12 +504,13 @@ prompt/sampler references before allocating matrix canvases. A VRAM-only evictio
 is insufficient because it may move weights into system RAM. Keep this option
 enabled by default unless a regression is proven.
 
-### RAM watchdog
+### Removed RAM watchdog
 
-The adaptive RAM implementation remains in the source, but
-`RAM_WATCHDOG_ENABLED = False`. Its UI is visible but read-only. Do not re-enable it
-without explicit cross-system testing and a deliberate release decision. Disk
-spooling, model unload, dimension limits, and multi-page composition remain active.
+The hardware-specific adaptive RAM watchdog was already disabled in the public beta
+and has now been removed from the runtime and UI. The extension no longer polls
+physical RAM or Windows commit headroom and does not perform adaptive between-cell
+stops. Disk spooling, full model unload, dimension/area limits, fixed run caps,
+multi-page composition, and recovery manifests remain the active safeguards.
 
 ### Branch and release layout
 
@@ -481,58 +534,47 @@ files. See `AGENTS.md` for the release procedure.
      top-level `networks` module lazily inside `_unload_forge_model_for_matrix()`.
      Validate expected attributes before clearing; do not add a new startup scan.
 
-2. **Adaptive RAM watchdog is disabled**
-   - Threshold behavior was too hardware-specific and caused premature stops after
-     initial model/LoRA loading spikes.
-   - The 2,743-cell run succeeded with the watchdog disabled and model unload enabled.
-   - On 2026-08-09 the maintainer reported several days of extensive, stable use on
-     their machine without the watchdog. This is strong single-system evidence, but
-     not yet a basis for removing the existing disk/recovery safeguards or claiming
-     cross-system stability.
-   - A universal design must account for Windows commit/pagefile headroom, persistent
-     model allocation, temporary loading spikes, and page-composition memory.
-
 ### Accepted beta limitations / backlog
 
-3. **Matrix margin inconsistency**
+2. **Matrix margin inconsistency**
    - Vertical row spacing works. Horizontal cell spacing currently applies only when
      `Draw Legend in Matrix Grid` is enabled.
 
-4. **Grid date folders**
+3. **Grid date folders**
    - When model unload is enabled, saved grids use Forge's grid output root instead
      of Forge's configured date-subfolder layout.
 
-5. **First Generate click may only commit a corrected table cell**
+4. **First Generate click may only commit a corrected table cell**
    - After correcting an invalid active Dataframe cell, the first Generate click can
      return focus to the table without starting. The second click starts normally.
    - This is a Gradio table-submit/focus issue; no generated data is lost.
 
-6. **Cold-start invalid-input progress behavior**
+5. **Cold-start invalid-input progress behavior**
    - On a cold model start, an invalid table value was once shown in the progress
      area and followed by delayed cleanup roughly 1–2 minutes later. Warm starts only
      showed the trace warning. Observe and reproduce before changing processing flow.
 
-7. **No third trigger position**
+6. **No third trigger position**
    - Existing `Start` means before the user's prompt; `End` means after the injected
      LoRA tag. Backlog request: add `Before LoRA` to place trigger text immediately
      before `<lora:...>` while leaving the user's prompt first.
 
-8. **Settings are not persisted**
+7. **Settings are not persisted**
    - Static UI settings reset between sessions. LoRA inventory, selected LoRAs,
      trigger values, and table rows are dynamic and should not be persisted blindly.
    - Backlog: persist safe static txt2img/img2img settings separately.
 
-9. **Extreme one-row reflow is not implemented**
+8. **Extreme one-row reflow is not implemented**
    - If one labeled row alone exceeds an active page limit, alpha.2 rejects it safely
      and retains recovery data instead of returning an unsafe image to Gradio.
    - A future enhancement could reflow that row into fewer columns and still produce a
      deliverable matrix page automatically.
 
-10. **No resume-after-restart workflow**
+9. **No resume-after-restart workflow**
     - Manifests and sources preserve recovery data after interruption, but there is no
       UI to resume a multi-hour run after Forge or Windows restarts.
 
-11. **Individual-image finalization can be optimized**
+10. **Individual-image finalization can be optimized**
     - Retained images are first spooled under `tmp` and moved to the final run folder
       after generation. A future implementation could spool directly into the final
       folder while preserving atomic writes and recovery semantics.
@@ -570,9 +612,9 @@ files. See `AGENTS.md` for the release procedure.
    reload API and processing boundary that can switch models sequentially without a
    second persistent model or recursive processing call. Add pure run-plan, family-
    classifier, manifest, and restore-path tests first.
-2. Add the one-LoRA/up-to-ten-checkpoint selector and shared-weight run plan described
-   in the 2026-08-13 handoff. Keep compatibility classification extension-local and
-   make Forge's loaded-model key mapping authoritative.
+2. Validate the one-LoRA/multiple-checkpoint selector and shared-weight run plan at
+   the 25-checkpoint standard boundary and selected Extreme cases. Keep compatibility
+   classification extension-local and make Forge's loaded-model key mapping authoritative.
 3. Implement sequential checkpoint rows, immediate disk persistence, failed-row
    labeling, combined overview scaling/splitting, and unconditional original-model
    restoration. Verify one same-family pair before widening coverage.
@@ -603,15 +645,12 @@ files. See `AGENTS.md` for the release procedure.
 16. Design static settings persistence without persisting dynamic selections.
 17. Add optional preflight information (planned cells, approximate rows/pages, and a
    conservative disk/time warning) without adding another user-editable cell limit.
-18. Revisit adaptive RAM protection only after gathering measurements from different
-   RAM sizes, model families, pagefiles, and loading strategies.
-19. Consider manifest-based resume support for multi-hour Extreme Run jobs.
+18. Consider manifest-based resume support for multi-hour Extreme Run jobs.
 
 ## Relevant files and functions
 
 ### `scripts/lora_tester.py`
 
-- `RamMonitor`: dormant peak sampler used only if the release switch is enabled.
 - `LoRaMetadataReader.get_lora_dir()`: derives Forge's configured LoRA directory.
 - `LoRaMetadataReader.find_all_loras()`: recursive model and metadata inventory.
 - `forge_neo_model_family.py`: portable preset normalization, model-family capability
@@ -629,8 +668,9 @@ files. See `AGENTS.md` for the release procedure.
 - `_compose_lora_prompt()`: Start/End trigger placement and LoRA injection.
 - `before_process()`: validates UI data, expands cases, creates run state/manifest.
 - `_force_batch_rng_seed()`: enforces the shared resolved seed for every cell.
-- `before_process_batch()`: applies per-cell prompts/LoRA tags and RAM-stop logic.
-- `postprocess_image_after_composite()`: atomic per-cell disk spool and RAM release.
+- `before_process_batch()`: applies per-cell prompts/LoRA tags and fixed-seed state.
+- `postprocess_image_after_composite()`: atomic per-cell disk spool and large-reference
+  release.
 - `_unload_forge_model_for_matrix()`: checkpoint/text encoder/VAE unload.
 - `_finalize_individual_images()`: moves retained source PNGs to final run folders.
 - `_write_manifest()`: persistent recovery state.
@@ -643,7 +683,7 @@ files. See `AGENTS.md` for the release procedure.
 - `_build_requested_matrices()`: emits per-item pages first and the optional combined
   overview last.
 - `_build_row_strips()`: creates labeled comparison/reference row PNGs on disk.
-- `_estimate_page_peak()`: dimension and conservative memory estimate.
+- `_estimate_page_peak()`: static dimension limits and informational memory estimate.
 - `_build_matrix_pages()`: page packing and repeated-reference propagation.
 - `_compose_matrix_page()`: creates/saves one final page.
 - `_cleanup_spool_files()`: recovery-safe source/row/manifest cleanup.
