@@ -11,8 +11,9 @@ import tempfile
 import unittest
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from PIL import Image, ImageColor, PngImagePlugin
+from PIL import Image, ImageColor, ImageDraw, ImageFont, PngImagePlugin
 from types import ModuleType, SimpleNamespace
+from typing import Dict
 from unittest import mock
 
 
@@ -50,6 +51,10 @@ def load_class_methods(class_name, *method_names):
         "copy": copy,
         "Image": Image,
         "ImageColor": ImageColor,
+        "ImageDraw": ImageDraw,
+        "images": SimpleNamespace(
+            get_font=lambda size: ImageFont.load_default(),
+        ),
         "PngImagePlugin": PngImagePlugin,
         "Path": Path,
         "json": json,
@@ -59,9 +64,15 @@ def load_class_methods(class_name, *method_names):
         "gc": gc,
         "Decimal": Decimal,
         "InvalidOperation": InvalidOperation,
+        "Dict": Dict,
         "StableDiffusionProcessing": object,
         "shared": SimpleNamespace(
-            cmd_opts=SimpleNamespace(embeddings_dir="."),
+            cmd_opts=SimpleNamespace(
+                embeddings_dir=".",
+                lora_dir=".",
+                lora_dirs=[],
+            ),
+            models_path=".",
             sd_model=None,
         ),
         "read_embedding_trigger_words": lambda path: ([Path(path).stem], "filename"),
@@ -98,6 +109,7 @@ METHODS = load_methods(
     "_build_comparison_matrix_pages",
     "_build_per_item_matrix_pages",
     "_build_requested_matrices",
+    "_build_seed_round_matrix_pages",
     "_group_comparison_cells",
     "_comparison_group_error",
     "_matrix_output_slug",
@@ -107,11 +119,21 @@ METHODS = load_methods(
     "_resolve_trigger_words",
     "_resolve_item_weights",
     "_multi_model_request_error",
+    "_multi_model_cells_per_seed",
+    "_batch_seed_rounds",
+    "_expand_cases_for_seed_rounds",
+    "_relative_checkpoint_folder",
+    "_checkpoint_folder_choices",
+    "_filtered_checkpoint_choices",
     "_build_multi_model_overview_pages",
     "_multi_model_page_geometry",
     "_prepare_multi_model_job_arguments",
+    "_persist_multi_model_outputs",
+    "_is_multi_model_temporary_page",
+    "_cleanup_multi_model_sources",
     "_postprocess_multi_model",
     "_run_multi_model_jobs",
+    "_force_batch_rng_seed",
     "_split_multi_model_overview_records",
     "_suppress_multi_model_coordinator_batch",
     "before_process_batch",
@@ -123,6 +145,7 @@ METHODS = load_methods(
     "_validate_matrix_pages",
     "_write_manifest",
     "_cleanup_spool_files",
+    "before_process",
 )
 RecoveryHarness._matrix_only_cleanup_decision = staticmethod(
     METHODS["_matrix_only_cleanup_decision"]
@@ -152,6 +175,22 @@ RecoveryHarness._resolve_item_weights = classmethod(METHODS["_resolve_item_weigh
 RecoveryHarness._multi_model_request_error = classmethod(
     METHODS["_multi_model_request_error"]
 )
+RecoveryHarness._multi_model_cells_per_seed = classmethod(
+    METHODS["_multi_model_cells_per_seed"]
+)
+RecoveryHarness._batch_seed_rounds = staticmethod(METHODS["_batch_seed_rounds"])
+RecoveryHarness._expand_cases_for_seed_rounds = staticmethod(
+    METHODS["_expand_cases_for_seed_rounds"]
+)
+RecoveryHarness._relative_checkpoint_folder = staticmethod(
+    METHODS["_relative_checkpoint_folder"]
+)
+RecoveryHarness._checkpoint_folder_choices = classmethod(
+    METHODS["_checkpoint_folder_choices"]
+)
+RecoveryHarness._filtered_checkpoint_choices = classmethod(
+    METHODS["_filtered_checkpoint_choices"]
+)
 RecoveryHarness._build_multi_model_overview_pages = METHODS[
     "_build_multi_model_overview_pages"
 ]
@@ -161,8 +200,20 @@ RecoveryHarness._multi_model_page_geometry = classmethod(
 RecoveryHarness._prepare_multi_model_job_arguments = classmethod(
     METHODS["_prepare_multi_model_job_arguments"]
 )
+RecoveryHarness._persist_multi_model_outputs = METHODS[
+    "_persist_multi_model_outputs"
+]
+RecoveryHarness._is_multi_model_temporary_page = staticmethod(
+    METHODS["_is_multi_model_temporary_page"]
+)
+RecoveryHarness._cleanup_multi_model_sources = METHODS[
+    "_cleanup_multi_model_sources"
+]
 RecoveryHarness._postprocess_multi_model = METHODS["_postprocess_multi_model"]
 RecoveryHarness._run_multi_model_jobs = METHODS["_run_multi_model_jobs"]
+RecoveryHarness._force_batch_rng_seed = staticmethod(
+    METHODS["_force_batch_rng_seed"]
+)
 RecoveryHarness._split_multi_model_overview_records = classmethod(
     METHODS["_split_multi_model_overview_records"]
 )
@@ -197,6 +248,9 @@ RecoveryHarness._build_per_item_matrix_pages = METHODS[
     "_build_per_item_matrix_pages"
 ]
 RecoveryHarness._build_requested_matrices = METHODS["_build_requested_matrices"]
+RecoveryHarness._build_seed_round_matrix_pages = METHODS[
+    "_build_seed_round_matrix_pages"
+]
 RecoveryHarness._group_comparison_cells = staticmethod(
     METHODS["_group_comparison_cells"]
 )
@@ -212,6 +266,7 @@ RecoveryHarness._comparison_capacity = classmethod(METHODS["_comparison_capacity
 RecoveryHarness._comparison_range_hint = classmethod(
     METHODS["_comparison_range_hint"]
 )
+RecoveryHarness.before_process = METHODS["before_process"]
 RecoveryHarness.MAX_TOTAL_CASES = 500
 RecoveryHarness.MAX_EXTREME_TOTAL_CASES = 10_000
 RecoveryHarness.MAX_WEIGHTS_PER_ITEM = 100
@@ -234,11 +289,91 @@ RecoveryHarness.TEST_TYPE_PROMPT = "Prompt only (internal)"
 RecoveryHarness.MULTI_MODEL_CURRENT = "Current model only (existing behavior)"
 RecoveryHarness.MULTI_MODEL_LORA = "One LoRA across selected models"
 RecoveryHarness.MULTI_MODEL_PROMPT = "Prompt only across selected models"
+RecoveryHarness.MULTI_OVERVIEW_MODELS_FIRST = (
+    "Models first — seed rounds as columns"
+)
+RecoveryHarness.MULTI_OVERVIEW_SEEDS_FIRST = (
+    "Seeds first — models grouped by seed round"
+)
 RecoveryHarness.MAX_MULTI_MODEL_CHECKPOINTS = 25
 RecoveryHarness.MAX_EXTREME_MULTI_MODEL_CHECKPOINTS = 150
+RecoveryHarness.ALL_CHECKPOINT_FOLDERS = "__lora_tester_all_checkpoint_folders__"
+RecoveryHarness.ROOT_CHECKPOINT_FOLDER = "__lora_tester_root_checkpoint_folder__"
 RecoveryHarness.PROMPT_ONLY_SENTINEL = "__lora_tester_prompt_only__"
 RecoveryHarness.BATCH_MODEL_LABEL_ATTRIBUTE = "_lora_tester_batch_model_label"
+RecoveryHarness.BATCH_SEED_ROUNDS_ATTRIBUTE = "_lora_tester_batch_seed_rounds"
 RecoveryHarness.PROCESSING_STATE_ATTRIBUTE = "_lora_tester_state"
+RecoveryHarness.KEEP_INDIVIDUAL_OUTPUT = "Matrix + individual images (Recommended)"
+RecoveryHarness.MATRIX_ONLY_OUTPUT = (
+    "Matrix only — permanently delete individual images after successful matrix creation"
+)
+
+
+class MetadataReaderHarness:
+    pass
+
+
+METADATA_METHODS = load_class_methods(
+    "LoRaMetadataReader",
+    "get_lora_dir",
+    "get_lora_dirs",
+    "find_all_loras",
+    "read_lora_metadata",
+)
+MetadataReaderHarness.get_lora_dir = staticmethod(
+    METADATA_METHODS["get_lora_dir"]
+)
+MetadataReaderHarness.get_lora_dirs = staticmethod(
+    METADATA_METHODS["get_lora_dirs"]
+)
+MetadataReaderHarness.find_all_loras = staticmethod(
+    METADATA_METHODS["find_all_loras"]
+)
+MetadataReaderHarness.read_lora_metadata = staticmethod(
+    METADATA_METHODS["read_lora_metadata"]
+)
+for metadata_method in METADATA_METHODS.values():
+    metadata_method.__globals__["LoRaMetadataReader"] = MetadataReaderHarness
+
+
+class LoRaMetadataReaderTests(unittest.TestCase):
+    def test_primary_and_additional_forge_lora_roots_are_inventoried_once(self):
+        shared_stub = METADATA_METHODS["get_lora_dir"].__globals__["shared"]
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            temporary_root = Path(temporary_root)
+            primary_root = temporary_root / "primary"
+            additional_root = temporary_root / "additional"
+            (primary_root / "styles").mkdir(parents=True)
+            (additional_root / "styles").mkdir(parents=True)
+            (primary_root / "styles" / "same-name.pt").write_bytes(b"primary")
+            (additional_root / "styles" / "same-name.pt").write_bytes(b"additional")
+            (additional_root / "extra.ckpt").write_bytes(b"extra")
+            shared_stub.cmd_opts = SimpleNamespace(
+                lora_dir=str(primary_root),
+                lora_dirs=[str(additional_root), str(primary_root)],
+            )
+
+            roots = MetadataReaderHarness.get_lora_dirs()
+            inventory = MetadataReaderHarness.find_all_loras()
+
+        self.assertEqual(
+            [path.resolve() for path in roots],
+            [primary_root.resolve(), additional_root.resolve()],
+        )
+        self.assertEqual(len(inventory), 3)
+        self.assertIn(str(Path("styles") / "same-name.pt"), inventory)
+        additional_keys = [
+            key for key in inventory if key.startswith("[Additional root 1:")
+        ]
+        self.assertEqual(len(additional_keys), 2)
+        self.assertEqual(
+            {
+                Path(entry["source_root"]).resolve()
+                for entry in inventory.values()
+            },
+            {primary_root.resolve(), additional_root.resolve()},
+        )
 
 
 class MultiModelPlanTests(unittest.TestCase):
@@ -291,6 +426,226 @@ class MultiModelPlanTests(unittest.TestCase):
                 self.harness.TEST_TYPE_EMBEDDING,
                 [],
             )
+        )
+
+    def test_batch_count_expands_prompt_cases_with_forge_seed_progression(self):
+        rounds = self.harness._batch_seed_rounds(42, 7, 3)
+        expanded = self.harness._expand_cases_for_seed_rounds(
+            [
+                {
+                    "kind": "prompt",
+                    "label": "Model A",
+                    "item_key": "prompt",
+                }
+            ],
+            rounds,
+        )
+
+        self.assertEqual([case["seed"] for case in expanded], [42, 43, 44])
+        self.assertEqual([case["subseed"] for case in expanded], [7, 8, 9])
+        self.assertEqual([case["seed_round"] for case in expanded], [0, 1, 2])
+        self.assertIn("Seed 44", expanded[2]["label"])
+
+        state = {
+            "fixed_seed": 42,
+            "fixed_subseed": 7,
+            "cases": expanded,
+        }
+        processing = SimpleNamespace(
+            batch_size=1,
+            all_seeds=[42, 43, 44],
+            all_subseeds=[7, 8, 9],
+            rng=None,
+        )
+        seeds = [999]
+        subseeds = [999]
+        self.harness._force_batch_rng_seed(
+            processing,
+            state,
+            1,
+            seeds,
+            subseeds,
+        )
+
+        self.assertEqual(seeds, [43])
+        self.assertEqual(subseeds, [8])
+        self.assertEqual(processing.all_seeds, [42, 43, 44])
+        self.assertEqual(processing.all_subseeds, [7, 8, 9])
+
+    def test_multi_model_seed_labels_are_reserved_for_the_shared_overview(self):
+        expanded = self.harness._expand_cases_for_seed_rounds(
+            [{"label": "Model A"}],
+            self.harness._batch_seed_rounds(42, 7, 2),
+            include_seed_label=False,
+        )
+
+        self.assertEqual([case["label"] for case in expanded], ["Model A", "Model A"])
+
+    def test_batch_count_preserves_forge_variation_seed_semantics(self):
+        rounds = self.harness._batch_seed_rounds(
+            42,
+            100,
+            3,
+            subseed_strength=0.25,
+        )
+
+        self.assertEqual([round_info["seed"] for round_info in rounds], [42, 42, 42])
+        self.assertEqual(
+            [round_info["subseed"] for round_info in rounds],
+            [100, 101, 102],
+        )
+
+    def test_current_model_batch_count_expands_complete_seed_rounds(self):
+        fake_processing = ModuleType("modules.processing")
+        fake_processing.get_fixed_seed = lambda seed: 999 if int(seed) == -1 else int(seed)
+        fake_modules = ModuleType("modules")
+        fake_modules.processing = fake_processing
+
+        self.harness.cached_loras = {
+            "one.safetensors": {
+                "name": "one",
+                "alias": None,
+                "trigger_words": [],
+            }
+        }
+        self.harness._move_spool_hooks_last = lambda p: None
+        self.harness._ensure_temp_directory = lambda: None
+        self.harness._processing_output_mode = lambda p: "txt2img"
+        self.harness._write_manifest = lambda state, status: None
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            session_dir = Path(temporary_root) / "session"
+            session_dir.mkdir()
+            individual_dir = Path(temporary_root) / "individual"
+            self.harness._create_spool_directory = (
+                lambda p, output_mode: (session_dir, individual_dir)
+            )
+            processing = SimpleNamespace(
+                n_iter=3,
+                batch_size=1,
+                seed=-1,
+                subseed=7,
+                subseed_strength=0.0,
+            )
+
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "modules": fake_modules,
+                    "modules.processing": fake_processing,
+                },
+            ):
+                self.harness.before_process(
+                    processing,
+                    True,
+                    self.harness.TEST_TYPE_LORA,
+                    ["one.safetensors"],
+                    "1.0",
+                    False,
+                    "End",
+                    [],
+                    [],
+                    "1.0",
+                    "End",
+                    [],
+                    True,
+                    False,
+                    True,
+                    self.harness.MATRIX_LAYOUT_STANDARD,
+                    False,
+                    True,
+                    3,
+                    8,
+                    self.harness.KEEP_INDIVIDUAL_OUTPUT,
+                    False,
+                    self.harness.MULTI_MODEL_CURRENT,
+                    [],
+                    self.harness.MULTI_OVERVIEW_MODELS_FIRST,
+                )
+
+            state = getattr(
+                processing,
+                self.harness.PROCESSING_STATE_ATTRIBUTE,
+            )
+
+        self.assertEqual(processing.n_iter, 6)
+        self.assertEqual(processing.batch_size, 1)
+        self.assertEqual(processing.seed, 999)
+        self.assertEqual(state["requested_batch_count"], 3)
+        self.assertEqual(state["cells_per_seed_round"], 2)
+        self.assertEqual(state["requested_generations"], 6)
+        self.assertEqual(
+            [case["seed"] for case in state["cases"]],
+            [999, 999, 1000, 1000, 1001, 1001],
+        )
+        self.assertEqual(
+            [case["subseed"] for case in state["cases"]],
+            [7, 7, 8, 8, 9, 9],
+        )
+
+    def test_multi_model_cell_plan_multiplies_one_seed_plan_later(self):
+        cells, error = self.harness._multi_model_cells_per_seed(
+            self.harness.MULTI_MODEL_LORA,
+            ["one.safetensors"],
+            "0:1:0.5",
+            [],
+            True,
+        )
+        prompt_cells, prompt_error = self.harness._multi_model_cells_per_seed(
+            self.harness.MULTI_MODEL_PROMPT,
+            [],
+            "ignored",
+            [],
+            True,
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(cells, 4)
+        self.assertIsNone(prompt_error)
+        self.assertEqual(prompt_cells, 1)
+
+    def test_checkpoint_folders_report_direct_and_recursive_counts(self):
+        choices = [
+            ("Root [aaaa]", "root.safetensors"),
+            ("Family A [bbbb]", r"family\a.safetensors"),
+            ("Family B [cccc]", r"family\variant\b.safetensors"),
+            ("Other [dddd]", r"other\c.ckpt"),
+        ]
+
+        folders = self.harness._checkpoint_folder_choices(choices)
+        folder_values = [value for _, value in folders]
+        family_label = next(label for label, value in folders if value == "family")
+
+        self.assertEqual(folder_values[0], self.harness.ALL_CHECKPOINT_FOLDERS)
+        self.assertIn(self.harness.ROOT_CHECKPOINT_FOLDER, folder_values)
+        self.assertIn("family", folder_values)
+        self.assertIn(r"family\variant", folder_values)
+        self.assertIn("1 direct / 2 incl. subfolders", family_label)
+
+    def test_checkpoint_folder_filter_selects_direct_or_recursive_scope(self):
+        choices = [
+            ("Family Root [aaaa]", r"family\root.safetensors"),
+            ("Family Nested [bbbb]", r"family\nested\model.safetensors"),
+            ("Other [cccc]", r"other\model.safetensors"),
+        ]
+
+        direct = self.harness._filtered_checkpoint_choices(
+            "family", False, choices
+        )
+        recursive = self.harness._filtered_checkpoint_choices(
+            "family", True, choices
+        )
+
+        self.assertEqual(
+            [value for _, value in direct],
+            [r"family\root.safetensors"],
+        )
+        self.assertEqual(
+            [value for _, value in recursive],
+            [
+                r"family\root.safetensors",
+                r"family\nested\model.safetensors",
+            ],
         )
 
     def test_standard_multi_model_limit_is_twenty_five(self):
@@ -374,6 +729,7 @@ class MultiModelPlanTests(unittest.TestCase):
         shared_stub = METHODS["_build_multi_model_overview_pages"].__globals__["shared"]
         shared_stub.opts = SimpleNamespace(
             grid_background_color="#000000",
+            grid_text_active_color="#ffffff",
             grid_save=False,
             enable_pnginfo=True,
         )
@@ -415,14 +771,218 @@ class MultiModelPlanTests(unittest.TestCase):
                 self.assertEqual(overview.getpixel((0, 0)), (255, 0, 0))
                 self.assertEqual(overview.getpixel((72, 0)), (0, 0, 255))
 
+    def test_models_first_keeps_seed_columns_and_model_rows(self):
+        shared_stub = METHODS["_build_multi_model_overview_pages"].__globals__["shared"]
+        shared_stub.opts = SimpleNamespace(
+            grid_background_color="#000000",
+            grid_save=False,
+            enable_pnginfo=True,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            temporary_root = Path(temporary_root)
+            colors = [
+                (255, 0, 0),
+                (0, 255, 0),
+                (0, 0, 255),
+                (255, 255, 0),
+            ]
+            source_pages = []
+            for index, color in enumerate(colors):
+                path = temporary_root / f"source-{index}.png"
+                Image.new("RGB", (64, 32), color).save(path)
+                source_pages.append(str(path))
+
+            state = {
+                "session_dir": str(temporary_root),
+                "matrix_cols": 3,
+                "matrix_margin": 8,
+                "fixed_seed": 42,
+                "multi_model_overview_order": (
+                    self.harness.MULTI_OVERVIEW_MODELS_FIRST
+                ),
+                "seed_rounds": [
+                    {"index": 0, "seed": 42, "subseed": 7, "label": "Seed 42"},
+                    {"index": 1, "seed": 43, "subseed": 8, "label": "Seed 43"},
+                ],
+                "multi_model_page_records": [
+                    {
+                        "model_index": 0,
+                        "model_page_index": 0,
+                        "seed_round": 0,
+                        "seed": 42,
+                        "subseed": 7,
+                    },
+                    {
+                        "model_index": 0,
+                        "model_page_index": 1,
+                        "seed_round": 1,
+                        "seed": 43,
+                        "subseed": 8,
+                    },
+                    {
+                        "model_index": 1,
+                        "model_page_index": 0,
+                        "seed_round": 0,
+                        "seed": 42,
+                        "subseed": 7,
+                    },
+                    {
+                        "model_index": 1,
+                        "model_page_index": 1,
+                        "seed_round": 1,
+                        "seed": 43,
+                        "subseed": 8,
+                    },
+                ],
+                "model_results": [
+                    {"label": "A", "status": "complete"},
+                    {"label": "B", "status": "complete"},
+                ],
+            }
+            processing = SimpleNamespace(
+                prompt="prompt",
+                outpath_grids=str(temporary_root),
+            )
+            processed = SimpleNamespace(all_seeds=[42], all_prompts=["prompt"])
+
+            pages, infotexts = self.harness._build_multi_model_overview_pages(
+                processing,
+                processed,
+                state,
+                source_pages,
+                ["grid info"] * 4,
+            )
+
+            self.assertEqual(len(pages), 1)
+            self.assertEqual(state["multi_model_overview_metadata"][0]["seed"], -1)
+            self.assertIn("LoRA Tester page seeds: 42, 43", infotexts[0])
+            self.assertIn("LoRA Tester page seed metadata: mixed (-1)", infotexts[0])
+            with Image.open(pages[0]) as overview:
+                self.assertEqual(overview.size, (136, 72))
+                self.assertEqual(overview.getpixel((0, 0)), colors[0])
+                self.assertEqual(overview.getpixel((72, 0)), colors[1])
+                self.assertEqual(overview.getpixel((0, 40)), colors[2])
+                self.assertEqual(overview.getpixel((72, 40)), colors[3])
+
+    def test_seeds_first_keeps_all_seed_rounds_in_one_shared_overview(self):
+        shared_stub = METHODS["_build_multi_model_overview_pages"].__globals__["shared"]
+        shared_stub.opts = SimpleNamespace(
+            grid_background_color="#000000",
+            grid_text_active_color="#ffffff",
+            grid_save=False,
+            enable_pnginfo=True,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            temporary_root = Path(temporary_root)
+            colors = [
+                (255, 0, 0),
+                (0, 255, 0),
+                (0, 0, 255),
+                (255, 255, 0),
+            ]
+            source_pages = []
+            for index, color in enumerate(colors):
+                path = temporary_root / f"source-{index}.png"
+                Image.new("RGB", (64, 32), color).save(path)
+                source_pages.append(str(path))
+
+            state = {
+                "session_dir": str(temporary_root),
+                "matrix_cols": 3,
+                "matrix_margin": 8,
+                "fixed_seed": 42,
+                "multi_model_overview_order": (
+                    self.harness.MULTI_OVERVIEW_SEEDS_FIRST
+                ),
+                "seed_rounds": [
+                    {"index": 0, "seed": 42, "subseed": 7, "label": "Seed 42"},
+                    {"index": 1, "seed": 43, "subseed": 8, "label": "Seed 43"},
+                ],
+                "multi_model_page_records": [
+                    {
+                        "model_index": 0,
+                        "model_page_index": 0,
+                        "seed_round": 0,
+                        "seed": 42,
+                        "subseed": 7,
+                    },
+                    {
+                        "model_index": 0,
+                        "model_page_index": 1,
+                        "seed_round": 1,
+                        "seed": 43,
+                        "subseed": 8,
+                    },
+                    {
+                        "model_index": 1,
+                        "model_page_index": 0,
+                        "seed_round": 0,
+                        "seed": 42,
+                        "subseed": 7,
+                    },
+                    {
+                        "model_index": 1,
+                        "model_page_index": 1,
+                        "seed_round": 1,
+                        "seed": 43,
+                        "subseed": 8,
+                    },
+                ],
+                "model_results": [
+                    {"label": "A", "status": "complete"},
+                    {"label": "B", "status": "complete"},
+                ],
+            }
+            processing = SimpleNamespace(
+                prompt="prompt",
+                outpath_grids=str(temporary_root),
+            )
+            processed = SimpleNamespace(all_seeds=[42], all_prompts=["prompt"])
+
+            pages, infotexts = self.harness._build_multi_model_overview_pages(
+                processing,
+                processed,
+                state,
+                source_pages,
+                ["seed-42-a", "seed-43-a", "seed-42-b", "seed-43-b"],
+            )
+
+            self.assertEqual(len(pages), 1)
+            metadata = state["multi_model_overview_metadata"][0]
+            self.assertEqual(metadata["seed"], -1)
+            self.assertEqual(metadata["layout"], "seed-rows")
+            self.assertEqual(metadata["columns"], 2)
+            self.assertEqual(metadata["rows"], 2)
+            self.assertGreater(metadata["seed_label_width"], 0)
+            self.assertTrue(infotexts[0].startswith("seed-42-a"))
+            self.assertIn("LoRA Tester page seeds: 42, 43", infotexts[0])
+            self.assertIn("mixed (-1)", infotexts[0])
+            with Image.open(pages[0]) as overview:
+                label_width = metadata["seed_label_width"]
+                first_image_x = label_width + 8
+                self.assertEqual(overview.height, 72)
+                self.assertEqual(overview.width, label_width + 144)
+                self.assertEqual(overview.getpixel((first_image_x, 0)), colors[0])
+                self.assertEqual(overview.getpixel((first_image_x + 72, 0)), colors[2])
+                self.assertEqual(overview.getpixel((first_image_x, 40)), colors[1])
+                self.assertEqual(overview.getpixel((first_image_x + 72, 40)), colors[3])
+                label_crop = overview.crop((0, 0, label_width, 32))
+                try:
+                    self.assertIsNotNone(label_crop.getbbox())
+                finally:
+                    label_crop.close()
+
     def test_nested_prompt_job_uses_noop_case_and_disables_recursion(self):
-        arguments = [None] * 23
+        arguments = [None] * 24
         arguments[0] = True
         arguments[1] = self.harness.TEST_TYPE_LORA
         arguments[2] = ["real-lora.safetensors"]
         arguments[11] = True
-        arguments[-2] = self.harness.MULTI_MODEL_PROMPT
-        arguments[-1] = ["model-a.safetensors"]
+        arguments[-3] = self.harness.MULTI_MODEL_PROMPT
+        arguments[-2] = ["model-a.safetensors"]
+        arguments[-1] = self.harness.MULTI_OVERVIEW_SEEDS_FIRST
 
         nested = self.harness._prepare_multi_model_job_arguments(
             arguments,
@@ -432,9 +992,10 @@ class MultiModelPlanTests(unittest.TestCase):
         self.assertEqual(nested[1], self.harness.TEST_TYPE_PROMPT)
         self.assertEqual(nested[2], [self.harness.PROMPT_ONLY_SENTINEL])
         self.assertFalse(nested[11])
-        self.assertEqual(nested[-2], self.harness.MULTI_MODEL_CURRENT)
-        self.assertEqual(nested[-1], [])
-        self.assertEqual(arguments[-2], self.harness.MULTI_MODEL_PROMPT)
+        self.assertEqual(nested[-3], self.harness.MULTI_MODEL_CURRENT)
+        self.assertEqual(nested[-2], [])
+        self.assertEqual(nested[-1], self.harness.MULTI_OVERVIEW_SEEDS_FIRST)
+        self.assertEqual(arguments[-3], self.harness.MULTI_MODEL_PROMPT)
 
     def test_prompt_case_is_not_mistaken_for_reference_baseline(self):
         self.assertFalse(
@@ -474,12 +1035,16 @@ class MultiModelPlanTests(unittest.TestCase):
             interrupted=False,
             stopping_generation=False,
         )
-        self.harness._build_multi_model_overview_pages = (
-            lambda p, processed, state, pages, infotexts: (
+        def build_overview(p, processed, state, pages, infotexts):
+            state["multi_model_overview_metadata"] = [
+                {"seed": 43, "subseed": 8}
+            ]
+            return (
                 ["combined-grid.png"],
                 ["combined grid info"],
             )
-        )
+
+        self.harness._build_multi_model_overview_pages = build_overview
         self.harness._write_manifest = lambda state, status: None
         self.harness._safe_unlink = lambda path: True
         self.harness._ensure_temp_directory = lambda: None
@@ -524,8 +1089,187 @@ class MultiModelPlanTests(unittest.TestCase):
         self.assertEqual(processed.images, ["combined-grid.png"])
         self.assertEqual(processed.infotexts, ["combined grid info"])
         self.assertEqual(processed.all_prompts, ["prompt"])
-        self.assertEqual(processed.all_seeds, [42])
+        self.assertEqual(processed.all_seeds, [43])
+        self.assertEqual(processed.all_subseeds, [8])
         self.assertEqual(processing.extra_result_images, [])
+
+    def test_successful_overview_deletes_only_tracked_temporary_model_pages(self):
+        shared_stub = METHODS["_postprocess_multi_model"].__globals__["shared"]
+        shared_stub.state = SimpleNamespace(
+            interrupted=False,
+            stopping_generation=False,
+        )
+        self.harness._write_manifest = lambda state, status: None
+        self.harness._ensure_temp_directory = lambda: None
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            temporary_root = Path(temporary_root)
+            spool_root = temporary_root / "tmp"
+            session_dir = spool_root / "outer"
+            nested_dir = spool_root / "nested"
+            saved_dir = temporary_root / "saved"
+            session_dir.mkdir(parents=True)
+            nested_dir.mkdir(parents=True)
+            saved_dir.mkdir()
+            temporary_page = nested_dir / "matrix-model-a.png"
+            persistent_page = saved_dir / "model-b.png"
+            overview_page = saved_dir / "combined.png"
+            for path in (temporary_page, persistent_page, overview_page):
+                path.write_bytes(b"png")
+
+            def build_overview(p, processed, state, pages, infotexts):
+                state["multi_model_overview_metadata"] = [
+                    {"seed": 42, "subseed": 7}
+                ]
+                return [str(overview_page)], ["overview"]
+
+            self.harness._build_multi_model_overview_pages = build_overview
+            state = {
+                "multi_model_pages": [
+                    str(temporary_page),
+                    str(persistent_page),
+                ],
+                "multi_model_temporary_pages": [str(temporary_page.resolve())],
+                "multi_model_infotexts": ["A", "B"],
+                "multi_model_prompts": ["prompt", "prompt"],
+                "multi_model_negative_prompts": ["negative", "negative"],
+                "multi_model_seeds": [42, 42],
+                "multi_model_subseeds": [7, 7],
+                "model_jobs": [{"label": "A"}, {"label": "B"}],
+                "model_results": [
+                    {"label": "A", "status": "complete"},
+                    {"label": "B", "status": "complete"},
+                ],
+                "original_model_restored": True,
+                "session_dir": str(session_dir),
+                "manifest_path": str(session_dir / "manifest.json"),
+            }
+            processing = SimpleNamespace(
+                _lora_tester_state=state,
+                prompt="prompt",
+                negative_prompt="negative",
+                extra_result_images=[],
+            )
+            processed = SimpleNamespace(
+                images=[],
+                extra_images=[],
+                infotexts=[],
+                all_prompts=[],
+                all_negative_prompts=[],
+                all_seeds=[],
+                all_subseeds=[],
+                comments="",
+                index_of_first_image=0,
+            )
+
+            self.harness._postprocess_multi_model(processing, processed, state)
+
+            self.assertFalse(temporary_page.exists())
+            self.assertTrue(persistent_page.exists())
+            self.assertTrue(overview_page.exists())
+            self.assertTrue(state["multi_model_source_cleanup_complete"])
+
+    def test_persisted_model_outputs_track_only_extension_spool_pages(self):
+        with tempfile.TemporaryDirectory() as temporary_root:
+            temporary_root = Path(temporary_root)
+            session_dir = temporary_root / "tmp" / "outer"
+            nested_dir = temporary_root / "tmp" / "nested"
+            saved_dir = temporary_root / "saved"
+            session_dir.mkdir(parents=True)
+            nested_dir.mkdir(parents=True)
+            saved_dir.mkdir()
+            temporary_page = nested_dir / "matrix-model-a.png"
+            persistent_page = saved_dir / "model-b.png"
+            temporary_page.write_bytes(b"png")
+            persistent_page.write_bytes(b"png")
+            state = {
+                "session_dir": str(session_dir),
+                "model_results": [],
+                "multi_model_temporary_pages": [],
+            }
+            processed = SimpleNamespace(
+                images=[str(temporary_page), str(persistent_page)],
+                infotexts=["A", "B"],
+            )
+
+            pages, infotexts = self.harness._persist_multi_model_outputs(
+                state,
+                {"label": "Model"},
+                processed,
+            )
+
+        self.assertEqual(pages, [str(temporary_page), str(persistent_page)])
+        self.assertEqual(infotexts, ["A", "B"])
+        self.assertEqual(
+            state["multi_model_temporary_pages"],
+            [str(temporary_page.resolve())],
+        )
+
+    def test_partial_multi_model_run_retains_temporary_model_pages(self):
+        shared_stub = METHODS["_postprocess_multi_model"].__globals__["shared"]
+        shared_stub.state = SimpleNamespace(
+            interrupted=False,
+            stopping_generation=False,
+        )
+        self.harness._write_manifest = lambda state, status: None
+        self.harness._ensure_temp_directory = lambda: None
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            temporary_root = Path(temporary_root)
+            session_dir = temporary_root / "tmp" / "outer"
+            nested_dir = temporary_root / "tmp" / "nested"
+            session_dir.mkdir(parents=True)
+            nested_dir.mkdir(parents=True)
+            temporary_page = nested_dir / "matrix-model-a.png"
+            overview_page = temporary_root / "combined.png"
+            temporary_page.write_bytes(b"png")
+            overview_page.write_bytes(b"png")
+
+            self.harness._build_multi_model_overview_pages = (
+                lambda p, processed, state, pages, infotexts: (
+                    [str(overview_page)],
+                    ["overview"],
+                )
+            )
+            state = {
+                "multi_model_pages": [str(temporary_page)],
+                "multi_model_temporary_pages": [str(temporary_page.resolve())],
+                "multi_model_infotexts": ["A"],
+                "multi_model_prompts": ["prompt"],
+                "multi_model_negative_prompts": ["negative"],
+                "multi_model_seeds": [42],
+                "multi_model_subseeds": [7],
+                "model_jobs": [{"label": "A"}, {"label": "B"}],
+                "model_results": [
+                    {"label": "A", "status": "complete"},
+                    {"label": "B", "status": "failed"},
+                ],
+                "original_model_restored": True,
+                "session_dir": str(session_dir),
+                "manifest_path": str(session_dir / "manifest.json"),
+            }
+            processing = SimpleNamespace(
+                _lora_tester_state=state,
+                prompt="prompt",
+                negative_prompt="negative",
+                extra_result_images=[],
+            )
+            processed = SimpleNamespace(
+                images=[],
+                extra_images=[],
+                infotexts=[],
+                all_prompts=[],
+                all_negative_prompts=[],
+                all_seeds=[],
+                all_subseeds=[],
+                comments="",
+                index_of_first_image=0,
+            )
+
+            self.harness._postprocess_multi_model(processing, processed, state)
+
+            self.assertTrue(temporary_page.exists())
+            self.assertIn("model job(s) failed", processed.comments)
 
     def test_multi_model_manifest_records_jobs_results_and_restore_status(self):
         with tempfile.TemporaryDirectory() as temporary_root:
@@ -534,6 +1278,9 @@ class MultiModelPlanTests(unittest.TestCase):
                 "manifest_path": str(manifest),
                 "multi_model": True,
                 "multi_model_mode": self.harness.MULTI_MODEL_PROMPT,
+                "multi_model_overview_order": (
+                    self.harness.MULTI_OVERVIEW_SEEDS_FIRST
+                ),
                 "model_jobs": [{"label": "A", "checkpoint": "a.safetensors"}],
                 "model_results": [
                     {
@@ -545,6 +1292,10 @@ class MultiModelPlanTests(unittest.TestCase):
                 ],
                 "original_checkpoint": "original.safetensors",
                 "original_model_restored": True,
+                "requested_batch_count": 3,
+                "requested_cells_per_model": 3,
+                "requested_generations": 3,
+                "seed_rounds": self.harness._batch_seed_rounds(42, 7, 3),
                 "cases": [{}],
                 "cells": {},
             }
@@ -556,6 +1307,15 @@ class MultiModelPlanTests(unittest.TestCase):
         self.assertEqual(payload["model_jobs"][0]["label"], "A")
         self.assertEqual(payload["model_results"][0]["status"], "complete")
         self.assertTrue(payload["original_model_restored"])
+        self.assertEqual(payload["requested_batch_count"], 3)
+        self.assertEqual(
+            payload["multi_model_overview_order"],
+            self.harness.MULTI_OVERVIEW_SEEDS_FIRST,
+        )
+        self.assertEqual(
+            [round_info["seed"] for round_info in payload["seed_rounds"]],
+            [42, 43, 44],
+        )
 
     def test_model_boundary_releases_processing_references(self):
         class ProcessingStub:
@@ -653,17 +1413,32 @@ class MultiModelPlanTests(unittest.TestCase):
 
     def test_model_jobs_unload_between_loads_then_restore_original_selection(self):
         events = []
+        job_plans = []
         shared_stub = METHODS["_run_multi_model_jobs"].__globals__["shared"]
         shared_stub.state = SimpleNamespace(
             interrupted=False,
             stopping_generation=False,
             job="",
+            job_count=-1,
         )
         fake_processing = ModuleType("modules.processing")
 
         def process_images(job_p):
             checkpoint = job_p.override_settings["sd_model_checkpoint"]
             events.append(("run", checkpoint))
+            job_plans.append(
+                (
+                    checkpoint,
+                    job_p.n_iter,
+                    [
+                        round_info["seed"]
+                        for round_info in getattr(
+                            job_p,
+                            self.harness.BATCH_SEED_ROUNDS_ATTRIBUTE,
+                        )
+                    ],
+                )
+            )
             return SimpleNamespace(
                 images=[f"{checkpoint}.png"],
                 infotexts=[checkpoint],
@@ -678,7 +1453,7 @@ class MultiModelPlanTests(unittest.TestCase):
         fake_modules.processing = fake_processing
 
         self.harness.args_from = 0
-        self.harness.args_to = 23
+        self.harness.args_to = 24
         self.harness._snapshot_forge_model_state = lambda: {
             "checkpoint": "original.safetensors"
         }
@@ -703,7 +1478,7 @@ class MultiModelPlanTests(unittest.TestCase):
             subseed=7,
             styles=[],
             override_settings={},
-            script_args=[None] * 23,
+            script_args=[None] * 24,
             prompt="prompt",
             negative_prompt="negative",
             n_iter=1,
@@ -711,6 +1486,8 @@ class MultiModelPlanTests(unittest.TestCase):
         )
         state = {
             "multi_model_mode": self.harness.MULTI_MODEL_PROMPT,
+            "requested_batch_count": 3,
+            "requested_generations": 6,
             "model_jobs": [
                 {
                     "checkpoint": "a.safetensors",
@@ -731,7 +1508,7 @@ class MultiModelPlanTests(unittest.TestCase):
             "multi_model_seeds": [],
             "multi_model_subseeds": [],
         }
-        arguments = [None] * 23
+        arguments = [None] * 24
 
         with mock.patch.dict(sys.modules, {"modules": fake_modules}):
             self.harness._run_multi_model_jobs(
@@ -752,7 +1529,16 @@ class MultiModelPlanTests(unittest.TestCase):
         )
         self.assertTrue(state["original_model_restored"])
         self.assertEqual([result["status"] for result in state["model_results"]], ["complete", "complete"])
+        self.assertEqual(
+            job_plans,
+            [
+                ("a.safetensors", 3, [42, 43, 44]),
+                ("b.safetensors", 3, [42, 43, 44]),
+            ],
+        )
         self.assertEqual(processing.n_iter, 0)
+        self.assertEqual(shared_stub.state.job_count, 6)
+        self.assertEqual(state["progress_job_count"], 6)
 
     def test_failed_unload_stops_before_next_model_and_still_restores(self):
         events = []
@@ -781,7 +1567,7 @@ class MultiModelPlanTests(unittest.TestCase):
         fake_modules.processing = fake_processing
 
         self.harness.args_from = 0
-        self.harness.args_to = 23
+        self.harness.args_to = 24
         self.harness._snapshot_forge_model_state = lambda: {
             "checkpoint": "original.safetensors"
         }
@@ -810,7 +1596,7 @@ class MultiModelPlanTests(unittest.TestCase):
             subseed=7,
             styles=[],
             override_settings={},
-            script_args=[None] * 23,
+            script_args=[None] * 24,
             prompt="prompt",
             negative_prompt="negative",
             n_iter=1,
@@ -843,7 +1629,7 @@ class MultiModelPlanTests(unittest.TestCase):
             self.harness._run_multi_model_jobs(
                 processing,
                 state,
-                [None] * 23,
+                [None] * 24,
             )
 
         self.assertEqual(
@@ -885,7 +1671,9 @@ class RunSummaryTests(unittest.TestCase):
 
         self.assertIn("6 comparison cell(s) + 1 reference", summary)
         self.assertIn("current model", summary)
-        self.assertIn("7 generation(s)", summary)
+        self.assertIn("7 base generation(s)", summary)
+        self.assertIn("Forge Batch Count", summary)
+        self.assertIn("Exact generations are resolved", summary)
         self.assertIn("500 cells/model", summary)
 
     def test_per_item_overrides_are_included_in_summary(self):
@@ -901,7 +1689,7 @@ class RunSummaryTests(unittest.TestCase):
 
         self.assertIn("3 comparison cell(s)", summary)
         self.assertIn("reference disabled", summary)
-        self.assertIn("3 generation(s)", summary)
+        self.assertIn("3 base generation(s)", summary)
 
     def test_prompt_only_summary_counts_selected_models(self):
         summary = self.summary(
@@ -911,7 +1699,8 @@ class RunSummaryTests(unittest.TestCase):
 
         self.assertIn("Prompt only", summary)
         self.assertIn("4 model(s)", summary)
-        self.assertIn("4 generation(s)", summary)
+        self.assertIn("Forge Batch Count", summary)
+        self.assertIn("Exact generations are resolved", summary)
         self.assertIn("25 models", summary)
 
     def test_invalid_weight_preview_warns_without_starting_a_run(self):
@@ -1159,6 +1948,69 @@ class PerItemMatrixTests(unittest.TestCase):
             "width": 832,
             "height": 1216,
         }
+
+    def test_seed_rounds_build_distinct_pages_and_reference_rows(self):
+        state = {
+            "seed_rounds": [
+                {"index": 0, "seed": 42, "subseed": 7, "label": "Seed 42"},
+                {"index": 1, "seed": 43, "subseed": 8, "label": "Seed 43"},
+            ],
+            "rows": [],
+            "matrix_outputs": [],
+            "reference_row": None,
+        }
+        cells = [
+            {"seed_round": 0, "is_baseline": True, "label": "Reference 42"},
+            {"seed_round": 0, "is_baseline": False, "label": "Prompt 42"},
+            {"seed_round": 1, "is_baseline": True, "label": "Reference 43"},
+            {"seed_round": 1, "is_baseline": False, "label": "Prompt 43"},
+        ]
+        prefixes = []
+
+        self.harness._build_row_strips = lambda *args, **kwargs: [
+            {"path": f"{kwargs['filename_prefix']}.png"}
+        ]
+
+        def build_matrices(
+            round_state,
+            comparison_cells,
+            processing,
+            processed,
+            grid_info,
+            reference_row=None,
+            output_slug_prefix=None,
+        ):
+            prefixes.append(output_slug_prefix)
+            round_state["rows"].append({"path": f"{output_slug_prefix}-row.png"})
+            round_state["matrix_outputs"].append(
+                {"kind": "combined", "path": f"{output_slug_prefix}.png"}
+            )
+            self.assertEqual(len(comparison_cells), 1)
+            self.assertIsNotNone(reference_row)
+            return [Path(f"{output_slug_prefix}.png")]
+
+        self.harness._build_requested_matrices = build_matrices
+
+        pages, seeds, subseeds = self.harness._build_seed_round_matrix_pages(
+            state,
+            cells,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            "grid info",
+        )
+
+        self.assertEqual(
+            prefixes,
+            ["seed-round-001-seed-42", "seed-round-002-seed-43"],
+        )
+        self.assertEqual([path.name for path in pages], [f"{prefix}.png" for prefix in prefixes])
+        self.assertEqual(seeds, [42, 43])
+        self.assertEqual(subseeds, [7, 8])
+        self.assertEqual(len(state["reference_rows"]), 2)
+        self.assertEqual(
+            [output["seed"] for output in state["matrix_outputs"]],
+            [42, 43],
+        )
 
     def test_cells_are_grouped_by_item_key_without_merging_duplicate_labels(self):
         cells = [

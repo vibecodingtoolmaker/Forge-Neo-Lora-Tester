@@ -16,6 +16,13 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   disk-spooling, matrix, and recovery paths without loading a fake LoRA file.
 - Added an always-visible planned-run summary for item, cell, reference, checkpoint,
   generation, and Standard/Extreme limit counts.
+- Added checkpoint-folder selection with optional recursive subfolder inclusion to
+  the sequential multiple-model workflow, matching the LoRA/Embedding inventory UX.
+- Added Forge Batch Count support to multiple-model runs. Each count creates a
+  Forge-compatible seed/subseed round shared across every selected checkpoint and
+  comparison cell, with independent seed-labeled matrix output.
+- Added a shared-overview organization choice: model rows with seed-round columns by
+  default, or one shared overview ordered by seed round with models grouped together.
 
 ### Changed
 
@@ -30,10 +37,32 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   extension startup.
 - Combine completed per-model pages into one shared comparison grid instead of
   returning one gallery grid per checkpoint; retain safety-driven page splitting.
+- Count Batch Count-expanded cells against the per-model Standard/Extreme limit before
+  loading the first checkpoint. Keep Batch Size serialized to one for disk-first
+  processing and recovery safety.
+- Store exact per-page seed metadata when an overview page contains one seed. Mark
+  mixed-seed pages with summary seed `-1` and retain their complete seed/subseed list
+  in PNG information and the recovery manifest.
 - Removed the disabled adaptive RAM watchdog, its read-only UI, background sampler,
   Windows commit checks, callback parameters, and dormant manifest fields.
 - Replaced the nested Per-Item, Multiple models, and Advanced accordions with four
   workflow tabs: Selection, Models & Run Size, Grid, and Output & Safety.
+
+### Fixed
+
+- Render Seeds-first results as one labeled row per seed inside the shared overview:
+  one left-hand seed label followed by the selected models as columns. Do not let the
+  ordinary Matrix Columns setting mix two seeds into the same visual row. Safety
+  limits can still split either organization into multiple pages.
+- Honor Forge Batch Count in the existing current-model LoRA and Embedding paths by
+  creating the same independently labeled seed/subseed rounds used by multi-model runs.
+- Set Forge's multi-model progress total before the first nested checkpoint job so
+  progress and ETA cover every model and seed round instead of exceeding 100 percent.
+- Remove only tracked extension-owned per-model temporary grids after a complete run
+  and validated shared overview; retain recovery sources on every partial path and
+  preserve user-saved Forge grids.
+- Inventory Forge's primary `lora_dir` and every additional `lora_dirs` root, while
+  deduplicating repeated roots and overlapping files.
 
 ### Safety
 

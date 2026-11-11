@@ -1,6 +1,6 @@
 # Forge Neo LoRA Tester – Project Status
 
-Last updated: 2026-11-08
+Last updated: 2026-11-11
 
 Repository: https://github.com/vibecodingtoolmaker/Forge-Neo-Lora-Tester
 
@@ -26,7 +26,78 @@ then this document, `README.md`, and the current Git diff before changing code.
   is intentionally retained on `develop` and omitted from `main`.
 - License: `AGPL-3.0-only`; copyright holder: `vibecodingtoolmaker`.
 
-## Development progress — 2026-11-08
+## Live follow-up — 2026-11-11
+
+- The maintainer confirmed that checkpoint-folder selection works and that
+  Models-first produces the intended complete shared overview.
+- The live Seeds-first test exposed that the implementation forced one overview per
+  seed round; the first correction then revealed that the ordinary Matrix Columns
+  value could still mix the next seed into the preceding row. Seeds-first is now a
+  strict table: one left-hand seed label and one model-result column per selected
+  model, with every new seed starting a new row. Page splitting occurs only at the
+  existing matrix safety limits.
+- The regression test now verifies seed labels, fixed model columns, row boundaries,
+  mixed-seed metadata, and immunity to a mismatching Matrix Columns value. A
+  restarted-Forge smoke of the correction remains required.
+
+## Tagesabschluss — 2026-11-10
+
+### Completed today
+
+- Added checkpoint-folder selection to the multiple-model workflow, including manual
+  selection, direct-folder scope, optional descendants, and Forge-owned checkpoint
+  identity/loading.
+- Preserved Forge Batch Count in multiple-model runs as cross-model seed/subseed
+  rounds while keeping Batch Size serialized to one and loading each checkpoint only
+  once per model job.
+- Added selectable shared-overview organization: model rows with seed-round columns by
+  default, or one shared overview ordered by seed round with models grouped together.
+  Final overview seed metadata distinguishes exact-seed pages from mixed-seed pages.
+- Closed scan findings 1, 3, 5, and 6 in the requested order:
+  - **1 — cleanup:** successful multi-model runs remove only tracked extension-owned
+    temporary per-model pages after overview validation;
+  - **3 — Current-model Batch Count:** LoRA/Embedding runs now use independently
+    labeled seed rounds and pre-generation cell-limit checks;
+  - **5 — progress:** Forge multi-model progress is initialized with the complete
+    generation count;
+  - **6 — additional LoRA roots:** inventory includes the primary `lora_dir` and every
+    additional `lora_dirs` root, with repeated roots and overlapping files
+    deduplicated.
+- Updated `AGENTS.md`, `README.md`, `CHANGELOG.md`, this handoff, production code, and
+  the development test suite together.
+
+### Verification at close
+
+- **80/80 unit tests pass** in Forge's Python environment.
+- Production syntax compilation and Ruff fatal-error checks pass.
+- The real Forge/Gradio bootstrap returns all 24 processing components and initializes
+  the configured LoRA-root list successfully.
+- Both shared-overview organizations, exact/mixed seed metadata, Current-model Batch
+  Count including seed `-1`, complete/partial temporary-page cleanup, all-model
+  progress totals, and multiple LoRA roots have direct regression coverage.
+- `git diff --check` passes.
+
+### Local state and next session
+
+- Repository remains on `develop` at committed base `bd1e9d5`, matching
+  `origin/develop` before the local work.
+- Six tracked files are modified locally: `AGENTS.md`, `CHANGELOG.md`,
+  `PROJECT_STATUS.md`, `README.md`, `scripts/lora_tester.py`, and
+  `tests/test_lora_tester_recovery.py`.
+- No commit, push, tag, branch promotion, or GitHub release was created.
+- The maintainer's running approximately 120-model KREA test uses the already-loaded
+  earlier extension code. Every change documented here requires a Forge restart before
+  it can be observed live.
+- First live follow-up: a short restarted-Forge smoke with Current model and multiple
+  models at Batch Count `3`, both overview organizations, progress/ETA observation,
+  successful temporary-page cleanup, and interruption recovery.
+- Second live follow-up: configure one additional LoRA root, refresh the inventory,
+  and verify its virtual root/folder selection.
+- Scan finding 2 remains deliberately open: Forge's basename-oriented LoRA registry
+  can still confuse identically named LoRAs in different folders or roots. Do not
+  treat those files as independently reliable until that issue is addressed.
+
+## Development progress — 2026-11-10
 
 The first one-LoRA/prompt-only multiple-checkpoint implementation and RAM-watchdog
 removal were frozen in `develop` commit `3557f45`; the workflow-tab UI followed in
@@ -63,24 +134,55 @@ Implemented:
 - An always-visible planned-run summary reuses the production weight parser and
   per-item override rules to show comparison cells, reference, models, total
   generations, active limits, and incomplete/invalid setup warnings.
+- Multi-model checkpoint inventory now mirrors LoRA/Embedding selection: choose a
+  non-empty Forge checkpoint folder, optionally include descendants, or retain manual
+  selection across the full inventory. Forge remains responsible for discovery,
+  checkpoint identity, alias resolution, and loading.
+- Multi-model runs now preserve Forge Batch Count as distinct seed/subseed rounds.
+  Every selected checkpoint uses the same seed sequence, every comparison within one
+  round remains fixed-seed, reference rows and matrix filenames are round-specific,
+  and expanded cells are limit-checked before the first checkpoint loads. Batch Size
+  remains serialized to one.
+- The shared multi-model overview can be organized either as model rows with seed
+  rounds in columns (the default) or in seed-first order with models grouped per
+  round. Both modes stay in one shared overview unless matrix safety limits require
+  splitting. Pages containing multiple seeds expose summary seed `-1` plus the
+  complete seed/subseed list in PNG information and the manifest.
+- Current-model LoRA and Embedding tests now preserve Forge Batch Count with the same
+  seed/subseed-round expansion and pre-generation cell-limit check as multi-model runs.
+- Forge progress is initialized with the complete multi-model generation count before
+  the first nested checkpoint job, so progress/ETA spans all checkpoints and rounds.
+- A fully successful shared overview removes only tracked extension-owned temporary
+  per-model grids. Partial runs retain them and their recovery manifest; persistent
+  Forge grid outputs are never deleted by this cleanup.
+- LoRA inventory now covers Forge's primary `lora_dir` and all additional `lora_dirs`,
+  deduplicating repeated roots and overlapping physical files.
 
 Verified in this development pass:
 
-- 66 unit tests pass in Forge's Python environment, including the four-tab structure,
-  planned-run calculations, simplified UI callback contract, explicit
-  watchdog-removal guard, run-plan validation,
+- 80 unit tests pass in Forge's Python environment, including both shared-overview
+  organizations, current/multi-model Batch Count seed
+  progression/variation semantics, cross-model handoff, seed-specific matrices,
+  successful/partial per-model cleanup, complete Forge progress totals, additional
+  LoRA roots, checkpoint-folder direct/recursive filtering, the four-tab structure,
+  planned-run calculations,
+  simplified UI callback contract, explicit watchdog-removal guard, run-plan validation,
   prompt-only recursion guard, manifest
   fields, strict run/unload ordering, unload-failure abort, processing-reference
   release, restoration input/state handoff, shared-grid aggregation, and real PNG
   composition for multiple model pages.
 - Production syntax and Ruff fatal-error checks pass. An isolated Gradio 4.40 UI
-  construction using Forge's official import bootstrap returned all 23 processing
-  components successfully, and `git diff --check` passes. A 1600x1400 local
+  construction using Forge's official import bootstrap returned all 24 processing
+  components, both new checkpoint-folder controls, and the overview-order control
+  successfully, and
+  `git diff --check` passes. A 1600x1400 local
   Headless-Chrome preview confirmed the four-tab header, Selection layout, and
   warning summary styling. Full interaction still requires a restarted-Forge smoke.
-- `main:scripts/lora_tester.py` and `develop:scripts/lora_tester.py` have the identical
-  blob `65cc82e0e5bf5eb6f45659ddb4631ed98562d1ad`. The temporary promotion worktree was
-  removed after the clean `origin/main` push. No new tag or GitHub release was created.
+- The committed `main:scripts/lora_tester.py` and `develop:scripts/lora_tester.py`
+  snapshots have the identical blob `65cc82e0e5bf5eb6f45659ddb4631ed98562d1ad`.
+  The checkpoint-folder, Batch Count, overview-order, cleanup/progress, and additional
+  LoRA-root work is currently an uncommitted local `develop` change; no new commit,
+  push, tag, or GitHub release was created.
 
 Not yet proven:
 
@@ -90,6 +192,16 @@ Not yet proven:
 - Remaining live gates include one-LoRA same-family checkpoints, repeated unload/reload,
   interruption/failure retention, original-model restoration, img2img, and finally
   focused KREA and MOSS runs.
+- The new checkpoint-folder controls still need one restarted-Forge interaction smoke
+  covering Manual selection, one direct folder, and the same folder with descendants.
+- Batch Count still needs a restarted-Forge generation smoke with at least two models
+  and three seed rounds, including output labels, per-round references, interruption,
+  original-model restoration, and both shared-overview organizations.
+- Current-model Batch Count, temporary-page cleanup, long-run progress/ETA, and one
+  configured additional LoRA root still need restarted-Forge live smokes.
+- The separate same-basename LoRA collision finding remains unresolved: Forge's LoRA
+  registry is basename-oriented, so identically named files in different folders or
+  roots must not yet be assumed independently selectable.
 
 ## Next agreed expansion — multi-item across checkpoints
 
@@ -699,7 +811,8 @@ files. See `AGENTS.md` for the release procedure.
 
 ### `scripts/lora_tester.py`
 
-- `LoRaMetadataReader.get_lora_dir()`: derives Forge's configured LoRA directory.
+- `LoRaMetadataReader.get_lora_dirs()`: derives Forge's primary and additional LoRA
+  roots and deduplicates repeated directories.
 - `LoRaMetadataReader.find_all_loras()`: recursive model and metadata inventory.
 - `forge_neo_model_family.py`: portable preset normalization, model-family capability
   mapping, Embedding sidecar-trigger resolution, and header-only SDXL dual-CLIP

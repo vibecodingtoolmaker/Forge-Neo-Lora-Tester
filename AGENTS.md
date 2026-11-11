@@ -39,8 +39,11 @@ These instructions apply to the entire Forge Neo LoRA Tester repository.
   `shared.models_path`, or the extension/repository location.
 - Do not add runtime network requests, telemetry, downloaded code execution, or
   automatic dependency installation. Metadata files are untrusted data.
-- Preserve fixed-seed comparison: every baseline/LoRA/weight cell must use the first
-  resolved seed, including Embedding/weight cells and when the user enters seed `-1`.
+- Preserve fixed-seed comparison within each seed round: every baseline/LoRA/weight
+  cell and every selected checkpoint must use that round's resolved seed. Forge Batch
+  Count above one creates Forge-compatible sequential seed rounds in current-model and
+  multiple-model modes; when the user enters seed `-1`, resolve the first seed once and
+  derive every round consistently across models.
 - Before model load, Embedding inventory may use Forge's selected UI preset and a
   header-only Safetensors scan. Generation-time validation and injection must reuse
   Forge's currently loaded SDXL text encoders and their compatibility-filtered
@@ -59,6 +62,9 @@ These instructions apply to the entire Forge Neo LoRA Tester repository.
 - Preserve Matrix-only recovery safety. Never delete source images unless all
   requested cells completed without interruption and every matrix page was written
   and validated. On ambiguity, retain sources and the recovery manifest.
+- Delete tracked temporary per-model grids only after the final shared overview is
+  validated and the complete multi-model run, including original-model restoration,
+  succeeded. Never delete user-saved Forge grid outputs.
 - Preserve automatic multi-page composition and the 65,000-pixel per-axis ceiling
   plus the 89,000,000-pixel Pillow/Gradio-safe page-area ceiling unless
   encoder/gallery testing justifies a deliberate change.

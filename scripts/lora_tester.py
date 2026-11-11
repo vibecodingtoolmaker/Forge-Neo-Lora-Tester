@@ -40,36 +40,98 @@ class LoRaMetadataReader:
 
     @staticmethod
     def get_lora_dir() -> Path:
-        """Get the LoRA models directory"""
-        lora_path = Path(shared.cmd_opts.lora_dir) if hasattr(shared.cmd_opts, 'lora_dir') and shared.cmd_opts.lora_dir else Path(shared.models_path) / "Lora"
-        return lora_path
+        """Return Forge's primary LoRA models directory."""
+
+        configured = getattr(shared.cmd_opts, 'lora_dir', None)
+        return (
+            Path(configured)
+            if configured
+            else Path(shared.models_path) / "Lora"
+        )
+
+    @staticmethod
+    def get_lora_dirs() -> list[Path]:
+        """Return Forge's primary and additional LoRA roots without duplicates."""
+
+        configured = [
+            LoRaMetadataReader.get_lora_dir(),
+            *(
+                Path(path)
+                for path in (getattr(shared.cmd_opts, 'lora_dirs', []) or [])
+                if path
+            ),
+        ]
+        roots = []
+        seen = set()
+        for root in configured:
+            try:
+                identity = os.path.normcase(str(root.resolve()))
+            except OSError:
+                identity = os.path.normcase(str(root.absolute()))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            roots.append(root)
+        return roots
 
     @staticmethod
     def find_all_loras() -> Dict[str, Dict]:
         """Find all LoRAs and their metadata"""
-        lora_dir = LoRaMetadataReader.get_lora_dir()
         loras = {}
+        seen_files = set()
 
-        if not lora_dir.exists():
-            return loras
+        for root_index, lora_dir in enumerate(
+            LoRaMetadataReader.get_lora_dirs()
+        ):
+            if not lora_dir.exists():
+                continue
+            root_label = lora_dir.name or f"root-{root_index + 1}"
 
-        # Search recursively for .safetensors and .ckpt files
-        for ext in ['*.safetensors', '*.ckpt', '*.pt']:
-            for lora_file in lora_dir.rglob(ext):
-                lora_name = lora_file.stem  # Filename without extension
-                relative_path = lora_file.relative_to(lora_dir)
+            # Match Forge's supported LoRA file extensions and recursive roots.
+            for ext in ['*.safetensors', '*.ckpt', '*.pt']:
+                for lora_file in lora_dir.rglob(ext):
+                    try:
+                        resolved_file = lora_file.resolve()
+                    except OSError:
+                        resolved_file = lora_file.absolute()
+                    file_identity = os.path.normcase(str(resolved_file))
+                    if file_identity in seen_files:
+                        continue
+                    seen_files.add(file_identity)
 
-                # Try to read metadata
-                metadata = LoRaMetadataReader.read_lora_metadata(lora_file)
+                    lora_name = lora_file.stem
+                    relative_path = lora_file.relative_to(lora_dir)
+                    if root_index == 0:
+                        inventory_path = relative_path
+                    else:
+                        inventory_path = (
+                            Path(
+                                f"[Additional root {root_index}: {root_label}]"
+                            )
+                            / relative_path
+                        )
+                    inventory_key = str(inventory_path)
+                    collision_index = 2
+                    while inventory_key in loras:
+                        inventory_path = (
+                            Path(
+                                f"[Additional root {root_index}: {root_label} "
+                                f"#{collision_index}]"
+                            )
+                            / relative_path
+                        )
+                        inventory_key = str(inventory_path)
+                        collision_index += 1
 
-                # Get alias from ss_output_name or use filename
-                alias = metadata.get('alias', lora_name)
-
-                loras[str(relative_path)] = {
-                    'name': lora_name,  # Base filename
-                    'alias': alias,  # Display name or ss_output_name
-                    'trigger_words': metadata.get('trigger_words', []),
-                }
+                    metadata = LoRaMetadataReader.read_lora_metadata(lora_file)
+                    alias = metadata.get('alias', lora_name)
+                    loras[inventory_key] = {
+                        'name': lora_name,
+                        'alias': alias,
+                        'trigger_words': metadata.get('trigger_words', []),
+                        'source_path': str(resolved_file),
+                        'source_root': str(lora_dir),
+                    }
 
         return loras
 
@@ -303,16 +365,21 @@ class LoRaTesterScript(scripts.Script):
     ROOT_LORA_FOLDER = "__lora_tester_root_folder__"
     ALL_EMBEDDING_FOLDERS = "__lora_tester_all_embedding_folders__"
     ROOT_EMBEDDING_FOLDER = "__lora_tester_root_embedding_folder__"
+    ALL_CHECKPOINT_FOLDERS = "__lora_tester_all_checkpoint_folders__"
+    ROOT_CHECKPOINT_FOLDER = "__lora_tester_root_checkpoint_folder__"
     TEST_TYPE_LORA = "LoRA"
     TEST_TYPE_EMBEDDING = "Embedding"
     TEST_TYPE_PROMPT = "Prompt only (internal)"
     MULTI_MODEL_CURRENT = "Current model only (existing behavior)"
     MULTI_MODEL_LORA = "One LoRA across selected models"
     MULTI_MODEL_PROMPT = "Prompt only across selected models"
+    MULTI_OVERVIEW_MODELS_FIRST = "Models first — seed rounds as columns"
+    MULTI_OVERVIEW_SEEDS_FIRST = "Seeds first — models grouped by seed round"
     MAX_MULTI_MODEL_CHECKPOINTS = 25
     MAX_EXTREME_MULTI_MODEL_CHECKPOINTS = 150
     PROMPT_ONLY_SENTINEL = "__lora_tester_prompt_only__"
     BATCH_MODEL_LABEL_ATTRIBUTE = "_lora_tester_batch_model_label"
+    BATCH_SEED_ROUNDS_ATTRIBUTE = "_lora_tester_batch_seed_rounds"
     MATRIX_LAYOUT_STANDARD = "Standard order"
     MATRIX_LAYOUT_COMPARE_HORIZONTAL = "Compare: LoRAs as rows"
     MATRIX_LAYOUT_COMPARE_VERTICAL = "Compare: LoRAs as columns"
@@ -389,18 +456,121 @@ class LoRaTesterScript(scripts.Script):
         return None
 
     @classmethod
+    def _multi_model_cells_per_seed(
+        cls,
+        mode,
+        lora_selection,
+        global_weight_spec,
+        lora_settings,
+        include_reference,
+    ):
+        """Return logical cells per model for one Forge Batch Count step."""
+
+        if mode == cls.MULTI_MODEL_PROMPT:
+            return 1, None
+        selected_loras = list(lora_selection or [])
+        if len(selected_loras) != 1:
+            return 0, "Multiple-model LoRA mode requires exactly one selected LoRA."
+
+        global_text = cls._cell_text(global_weight_spec)
+        global_weights = (
+            cls._parse_weight_spec(global_text, "global", report_errors=False)
+            if global_text
+            else [1.0]
+        )
+        if global_weights is None:
+            return 0, (
+                "The global LoRA weight is invalid. Enter one number or an inclusive "
+                "Min:Max:Step range."
+            )
+        settings = {
+            str(row[0]): row
+            for row in cls._coerce_settings_rows(lora_settings)
+            if row[0] not in (None, "")
+        }
+        selected = str(selected_loras[0])
+        weights, weight_error = cls._resolve_item_weights(
+            settings.get(selected),
+            2,
+            global_weights,
+            selected,
+            report_errors=False,
+        )
+        if weight_error:
+            return 0, weight_error
+        return len(weights) + (1 if include_reference else 0), None
+
+    @staticmethod
+    def _batch_seed_rounds(
+        base_seed,
+        base_subseed,
+        batch_count,
+        subseed_strength=0.0,
+    ):
+        """Mirror Forge's Batch Count seed/subseed progression."""
+
+        count = max(1, int(batch_count))
+        seed = int(base_seed)
+        subseed = int(base_subseed)
+        uses_variations = float(subseed_strength or 0.0) != 0.0
+        rounds = []
+        for index in range(count):
+            round_seed = seed if uses_variations else seed + index
+            round_subseed = subseed + index
+            label = f"Seed {round_seed}"
+            if uses_variations:
+                label += f" / variation {round_subseed}"
+            rounds.append(
+                {
+                    "index": index,
+                    "seed": round_seed,
+                    "subseed": round_subseed,
+                    "label": label,
+                }
+            )
+        return rounds
+
+    @staticmethod
+    def _expand_cases_for_seed_rounds(
+        cases,
+        seed_rounds,
+        include_seed_label=True,
+    ):
+        """Repeat one logical comparison plan for every requested seed round."""
+
+        rounds = list(seed_rounds or [])
+        if not rounds:
+            return list(cases or [])
+        show_seed = len(rounds) > 1
+        expanded = []
+        for round_info in rounds:
+            for base_index, case in enumerate(cases or []):
+                expanded_case = dict(case)
+                expanded_case["base_case_index"] = base_index
+                expanded_case["seed_round"] = int(round_info["index"])
+                expanded_case["seed"] = int(round_info["seed"])
+                expanded_case["subseed"] = int(round_info["subseed"])
+                if show_seed and include_seed_label:
+                    expanded_case["label"] = (
+                        f"{case['label']} — {round_info['label']}"
+                    )
+                expanded.append(expanded_case)
+        return expanded
+
+    @classmethod
     def _prepare_multi_model_job_arguments(cls, arguments, mode):
         """Disable the outer runner while preserving the normal inner tester path."""
 
         job_arguments = list(arguments)
-        if len(job_arguments) < 23:
+        if len(job_arguments) < 24:
             raise ValueError("Incomplete LoRA Tester script arguments for model job")
 
-        # The two multi-model components are deliberately appended to the stable
-        # existing callback contract. Disable them in the nested processing job so
-        # that the unchanged single-model tester executes exactly once.
-        job_arguments[-2] = cls.MULTI_MODEL_CURRENT
-        job_arguments[-1] = []
+        # The multi-model components are deliberately appended to the stable
+        # existing callback contract. Disable mode/selection in the nested processing
+        # job so that the unchanged single-model tester executes exactly once; the
+        # overview preference remains available only to the outer coordinator.
+        job_arguments[-3] = cls.MULTI_MODEL_CURRENT
+        job_arguments[-2] = []
 
         if mode == cls.MULTI_MODEL_PROMPT:
             job_arguments[1] = cls.TEST_TYPE_PROMPT
@@ -674,8 +844,9 @@ class LoRaTesterScript(scripts.Script):
             over_limit = model_count > model_limit
             message = (
                 f"<b>Planned run:</b> Prompt only &middot; {model_count} model(s) "
-                f"= <b>{model_count} generation(s)</b> &middot; {limit_label} limit: "
-                f"{model_limit} models"
+                f"&times; Forge Batch Count &middot; {limit_label} limit: "
+                f"{model_limit} models. Exact generations are resolved when "
+                "generation starts."
             )
             if over_limit:
                 message += " &middot; <b>Reduce the model selection</b>"
@@ -765,11 +936,14 @@ class LoRaTesterScript(scripts.Script):
         message = (
             f"<b>Planned run:</b> {len(selected_items)} {item_name}(s) &middot; "
             f"{comparison_cells} comparison cell(s){reference_text} &middot; {model_text} "
-            f"= <b>{total_generations} generation(s)</b> &middot; {limit_label} limits: "
+            f"= <b>{total_generations} base generation(s)</b> "
+            f"&times; Forge Batch Count "
+            f"&middot; {limit_label} limits: "
             f"{case_limit:,} cells/model"
         )
         if mode != cls.MULTI_MODEL_CURRENT:
             message += f", {model_limit} models"
+        message += ". Exact generations are resolved when generation starts"
         if over_case_limit or over_model_limit:
             message += " &middot; <b>Reduce the run or change Extreme Run Mode</b>"
         return summary(message, warning=over_case_limit or over_model_limit)
@@ -1266,6 +1440,95 @@ class LoRaTesterScript(scripts.Script):
         return [(info.title, info.name) for info in checkpoint_infos]
 
     @staticmethod
+    def _relative_checkpoint_folder(checkpoint_name):
+        """Return the relative Forge checkpoint folder, or root."""
+
+        parent = Path(str(checkpoint_name)).parent
+        return "" if parent == Path(".") else str(parent)
+
+    @classmethod
+    def _checkpoint_folder_choices(cls, checkpoint_choices=None):
+        """Build labeled choices for folders containing Forge checkpoints."""
+
+        checkpoint_choices = (
+            cls._checkpoint_choices()
+            if checkpoint_choices is None
+            else list(checkpoint_choices)
+        )
+        direct_counts = {}
+        recursive_counts = {}
+        for _, checkpoint_name in checkpoint_choices:
+            folder = cls._relative_checkpoint_folder(checkpoint_name)
+            direct_counts[folder] = direct_counts.get(folder, 0) + 1
+
+            parent = Path(folder) if folder else Path(".")
+            while parent != Path("."):
+                key = str(parent)
+                recursive_counts[key] = recursive_counts.get(key, 0) + 1
+                parent = parent.parent
+
+        choices = [(
+            f"Manual selection (all folders, {len(checkpoint_choices)} checkpoints)",
+            cls.ALL_CHECKPOINT_FOLDERS,
+        )]
+        root_count = direct_counts.get("", 0)
+        if root_count:
+            choices.append((f"Root folder ({root_count})", cls.ROOT_CHECKPOINT_FOLDER))
+
+        for folder in sorted(recursive_counts, key=lambda value: value.casefold()):
+            direct = direct_counts.get(folder, 0)
+            recursive = recursive_counts[folder]
+            if direct == recursive:
+                label = f"{folder} ({direct})"
+            else:
+                label = (
+                    f"{folder} ({direct} direct / {recursive} incl. subfolders)"
+                )
+            choices.append((label, folder))
+        return choices
+
+    @classmethod
+    def _filtered_checkpoint_choices(
+        cls,
+        folder_filter,
+        include_subfolders,
+        checkpoint_choices=None,
+    ):
+        """Return Forge checkpoints belonging to the selected folder scope."""
+
+        checkpoint_choices = (
+            cls._checkpoint_choices()
+            if checkpoint_choices is None
+            else list(checkpoint_choices)
+        )
+        if folder_filter in (None, "", cls.ALL_CHECKPOINT_FOLDERS):
+            return checkpoint_choices
+
+        wanted_folder = (
+            "" if folder_filter == cls.ROOT_CHECKPOINT_FOLDER else str(folder_filter)
+        )
+        wanted_path = Path(wanted_folder) if wanted_folder else Path(".")
+        choices = []
+        for label, checkpoint_name in checkpoint_choices:
+            folder = cls._relative_checkpoint_folder(checkpoint_name)
+            folder_path = Path(folder) if folder else Path(".")
+            matches = folder_path == wanted_path
+            if include_subfolders:
+                matches = matches or wanted_path in folder_path.parents
+            if matches:
+                choices.append((label, checkpoint_name))
+
+        def folder_order(choice):
+            relative = Path(str(choice[1])).relative_to(wanted_path)
+            parts = relative.parts
+            if len(parts) == 1:
+                return (0, "", parts[0].casefold())
+            subfolder = str(Path(*parts[:-1])).casefold()
+            return (1, subfolder, parts[-1].casefold())
+
+        return sorted(choices, key=folder_order)
+
+    @staticmethod
     def _resolve_checkpoint_jobs(checkpoint_selection):
         """Resolve UI aliases to Forge-owned checkpoint records at run time."""
 
@@ -1465,7 +1728,7 @@ class LoRaTesterScript(scripts.Script):
         for cell_index in sorted(state.get('cells', {})):
             cell = state['cells'][cell_index]
             source = Path(cell['path'])
-            seed = state.get('fixed_seed')
+            seed = cell.get('seed', state.get('fixed_seed'))
             seed_text = str(seed) if seed is not None else "unknown"
             label = cls._safe_filename_part(cell.get('label'))
             filename = f"{cell_index + 1:04d}_seed-{seed_text}_{label}.png"
@@ -1592,6 +1855,13 @@ class LoRaTesterScript(scripts.Script):
             'matrix_outputs': state.get('matrix_outputs', []),
             'extreme_run_mode': state.get('extreme_run_mode', False),
             'case_limit': state.get('case_limit'),
+            'requested_batch_count': state.get('requested_batch_count', 1),
+            'requested_batch_size': state.get('requested_batch_size', 1),
+            'cells_per_seed_round': state.get('cells_per_seed_round'),
+            'requested_cells_per_model': state.get('requested_cells_per_model'),
+            'requested_generations': state.get('requested_generations'),
+            'progress_job_count': state.get('progress_job_count'),
+            'seed_rounds': state.get('seed_rounds', []),
             'individual_output_dir': state.get('individual_output_dir'),
             'individual_images_finalized': state.get('individual_images_finalized', 0),
             'individual_finalize_error': state.get('individual_finalize_error'),
@@ -1599,6 +1869,7 @@ class LoRaTesterScript(scripts.Script):
             'expected_cell_count': len(state.get('cases', [])),
             'completed_cell_count': len(cells),
             'reference_row': state.get('reference_row'),
+            'reference_rows': state.get('reference_rows', []),
             'generation_interrupted': state.get('generation_interrupted', False),
             'matrix_only_delete_allowed': state.get(
                 'matrix_only_delete_allowed',
@@ -1614,6 +1885,21 @@ class LoRaTesterScript(scripts.Script):
             'model_unload_error': state.get('model_unload_error'),
             'multi_model': state.get('multi_model', False),
             'multi_model_mode': state.get('multi_model_mode'),
+            'multi_model_overview_order': state.get(
+                'multi_model_overview_order'
+            ),
+            'multi_model_page_records': state.get('multi_model_page_records', []),
+            'multi_model_temporary_pages': state.get(
+                'multi_model_temporary_pages',
+                [],
+            ),
+            'multi_model_source_cleanup_complete': state.get(
+                'multi_model_source_cleanup_complete'
+            ),
+            'multi_model_overview_metadata': state.get(
+                'multi_model_overview_metadata',
+                [],
+            ),
             'model_jobs': state.get('model_jobs', []),
             'model_results': state.get('model_results', []),
             'original_checkpoint': state.get('original_checkpoint'),
@@ -1904,14 +2190,41 @@ class LoRaTesterScript(scripts.Script):
                         elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_model_mode",
                     )
                     with gr.Group(visible=False) as multi_model_controls:
+                        checkpoint_choices = self._checkpoint_choices()
                         with FormRow():
                             refresh_checkpoints_btn = gr.Button(
                                 "Refresh Checkpoint List",
                                 variant="secondary",
                                 size="sm",
                             )
+                        with FormRow():
+                            checkpoint_folder = gr.Dropdown(
+                                choices=self._checkpoint_folder_choices(
+                                    checkpoint_choices
+                                ),
+                                value=self.ALL_CHECKPOINT_FOLDERS,
+                                label="Checkpoint Folder",
+                                info=(
+                                    "A folder selection loads every checkpoint in that "
+                                    "scope. Manual selection tests only explicitly "
+                                    "selected checkpoints."
+                                ),
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_checkpoint_folder",
+                            )
+                            include_checkpoint_subfolders = gr.Checkbox(
+                                value=True,
+                                label="Include subfolders",
+                                info=(
+                                    "Also include checkpoints below the selected folder."
+                                ),
+                                elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_include_checkpoint_subfolders",
+                            )
                         checkpoint_selection = gr.Dropdown(
-                            choices=self._checkpoint_choices(),
+                            choices=self._filtered_checkpoint_choices(
+                                self.ALL_CHECKPOINT_FOLDERS,
+                                True,
+                                checkpoint_choices,
+                            ),
                             multiselect=True,
                             label="Select Models / Checkpoints",
                             info=(
@@ -1919,6 +2232,24 @@ class LoRaTesterScript(scripts.Script):
                                 "Mode supports 150. Forge remains the compatibility authority."
                             ),
                             elem_id=f"{'img2img' if is_img2img else 'txt2img'}_lora_tester_checkpoint_selection",
+                        )
+                        multi_model_overview_order = gr.Radio(
+                            choices=[
+                                self.MULTI_OVERVIEW_MODELS_FIRST,
+                                self.MULTI_OVERVIEW_SEEDS_FIRST,
+                            ],
+                            value=self.MULTI_OVERVIEW_MODELS_FIRST,
+                            label="Shared overview organization",
+                            info=(
+                                "Both choices create one shared overview unless a "
+                                "matrix safety limit requires multiple pages. Models "
+                                "first groups seed rounds by model; Seeds first creates "
+                                "one labeled row per seed with models as columns."
+                            ),
+                            elem_id=(
+                                f"{'img2img' if is_img2img else 'txt2img'}_"
+                                "lora_tester_multi_overview_order"
+                            ),
                         )
                         gr.HTML(
                             value=(
@@ -2316,15 +2647,51 @@ class LoRaTesterScript(scripts.Script):
                 extreme_enabled,
             )
 
-        def update_checkpoint_list(selected_checkpoints):
-            choices = self._checkpoint_choices(refresh=True)
+        def update_checkpoint_list(
+            folder_filter, include_children, selected_checkpoints
+        ):
+            all_choices = self._checkpoint_choices(refresh=True)
+            folder_choices = self._checkpoint_folder_choices(all_choices)
+            folder_values = {choice[1] for choice in folder_choices}
+            if folder_filter not in folder_values:
+                folder_filter = self.ALL_CHECKPOINT_FOLDERS
+
+            choices = self._filtered_checkpoint_choices(
+                folder_filter,
+                include_children,
+                all_choices,
+            )
             valid_values = {value for _, value in choices}
-            preserved = [
-                checkpoint
-                for checkpoint in (selected_checkpoints or [])
-                if checkpoint in valid_values
-            ]
-            return gr.update(choices=choices, value=preserved)
+            if folder_filter in (None, "", self.ALL_CHECKPOINT_FOLDERS):
+                selected_checkpoints = [
+                    checkpoint
+                    for checkpoint in (selected_checkpoints or [])
+                    if checkpoint in valid_values
+                ]
+            else:
+                selected_checkpoints = [value for _, value in choices]
+            return (
+                gr.update(choices=folder_choices, value=folder_filter),
+                gr.update(choices=choices, value=selected_checkpoints),
+            )
+
+        def apply_checkpoint_folder_filter(
+            folder_filter, include_children, selected_checkpoints
+        ):
+            choices = self._filtered_checkpoint_choices(
+                folder_filter,
+                include_children,
+            )
+            valid_values = {value for _, value in choices}
+            if folder_filter in (None, "", self.ALL_CHECKPOINT_FOLDERS):
+                selected_checkpoints = [
+                    checkpoint
+                    for checkpoint in (selected_checkpoints or [])
+                    if checkpoint in valid_values
+                ]
+            else:
+                selected_checkpoints = [value for _, value in choices]
+            return gr.update(choices=choices, value=selected_checkpoints)
 
         def update_output_controls(create_per_item, create_combined):
             create_per_item, combined_enabled = self._resolve_matrix_outputs(
@@ -2531,9 +2898,33 @@ class LoRaTesterScript(scripts.Script):
 
         refresh_checkpoints_btn.click(
             fn=update_checkpoint_list,
-            inputs=[checkpoint_selection],
-            outputs=[checkpoint_selection],
+            inputs=[
+                checkpoint_folder,
+                include_checkpoint_subfolders,
+                checkpoint_selection,
+            ],
+            outputs=[checkpoint_folder, checkpoint_selection],
             show_progress=False,
+        )
+
+        checkpoint_folder.input(
+            fn=apply_checkpoint_folder_filter,
+            inputs=[
+                checkpoint_folder,
+                include_checkpoint_subfolders,
+                checkpoint_selection,
+            ],
+            outputs=[checkpoint_selection],
+        )
+
+        include_checkpoint_subfolders.input(
+            fn=apply_checkpoint_folder_filter,
+            inputs=[
+                checkpoint_folder,
+                include_checkpoint_subfolders,
+                checkpoint_selection,
+            ],
+            outputs=[checkpoint_selection],
         )
 
         per_item_grids.change(
@@ -2647,6 +3038,7 @@ class LoRaTesterScript(scripts.Script):
             unload_models_before_matrix,
             multi_model_mode,
             checkpoint_selection,
+            multi_model_overview_order,
         ]
 
     def before_process(self, p: StableDiffusionProcessing,
@@ -2660,7 +3052,8 @@ class LoRaTesterScript(scripts.Script):
                        matrix_cols, matrix_margin,
                        output_retention,
                        unload_models_before_matrix,
-                       multi_model_mode=None, checkpoint_selection=None):
+                       multi_model_mode=None, checkpoint_selection=None,
+                       multi_model_overview_order=None):
         """
         Prepare the current generation before Forge expands prompts and seeds.
 
@@ -2674,6 +3067,14 @@ class LoRaTesterScript(scripts.Script):
             return
 
         multi_model_mode = multi_model_mode or self.MULTI_MODEL_CURRENT
+        multi_model_overview_order = (
+            multi_model_overview_order or self.MULTI_OVERVIEW_MODELS_FIRST
+        )
+        if multi_model_overview_order not in {
+            self.MULTI_OVERVIEW_MODELS_FIRST,
+            self.MULTI_OVERVIEW_SEEDS_FIRST,
+        }:
+            multi_model_overview_order = self.MULTI_OVERVIEW_MODELS_FIRST
         multi_model_error = self._multi_model_request_error(
             multi_model_mode,
             checkpoint_selection,
@@ -2686,6 +3087,36 @@ class LoRaTesterScript(scripts.Script):
             return
 
         if multi_model_mode != self.MULTI_MODEL_CURRENT:
+            requested_batch_count = max(1, int(getattr(p, 'n_iter', 1) or 1))
+            requested_batch_size = max(1, int(getattr(p, 'batch_size', 1) or 1))
+            cells_per_seed_round, cell_plan_error = self._multi_model_cells_per_seed(
+                multi_model_mode,
+                lora_selection,
+                global_weight_spec,
+                lora_settings,
+                save_original,
+            )
+            if cell_plan_error:
+                self._block_generation(p, cell_plan_error)
+                return
+            requested_cells_per_model = cells_per_seed_round * requested_batch_count
+            case_limit = self._maximum_total_cases(extreme_run_mode)
+            if requested_cells_per_model > case_limit:
+                mode_hint = (
+                    "Reduce the weight range or Forge Batch Count."
+                    if extreme_run_mode
+                    else (
+                        "Reduce the weight range or Forge Batch Count, or enable "
+                        "Extreme Run Mode."
+                    )
+                )
+                self._block_generation(
+                    p,
+                    f"Forge Batch Count expands this multiple-model run to "
+                    f"{requested_cells_per_model:,} cells per checkpoint, above the "
+                    f"{case_limit:,}-cell limit. {mode_hint}",
+                )
+                return
             model_jobs, missing_checkpoints = self._resolve_checkpoint_jobs(
                 checkpoint_selection
             )
@@ -2723,6 +3154,16 @@ class LoRaTesterScript(scripts.Script):
                 'multi_model_negative_prompts': [],
                 'multi_model_seeds': [],
                 'multi_model_subseeds': [],
+                'multi_model_page_records': [],
+                'multi_model_temporary_pages': [],
+                'multi_model_overview_order': multi_model_overview_order,
+                'multi_model_overview_metadata': [],
+                'requested_batch_count': requested_batch_count,
+                'requested_batch_size': requested_batch_size,
+                'cells_per_seed_round': cells_per_seed_round,
+                'requested_cells_per_model': requested_cells_per_model,
+                'requested_generations': requested_cells_per_model * len(model_jobs),
+                'seed_rounds': [],
                 'original_checkpoint': None,
                 'original_model_restored': False,
                 'cases': [
@@ -2765,8 +3206,16 @@ class LoRaTesterScript(scripts.Script):
             p.do_not_save_samples = True
             print(
                 f"[LoRA Tester] Multiple-model mode enabled with "
-                f"{len(model_jobs)} sequential checkpoint job(s)"
+                f"{len(model_jobs)} sequential checkpoint job(s), "
+                f"Forge Batch Count {requested_batch_count}, "
+                f"{requested_cells_per_model} cell(s) per checkpoint, "
+                f"{requested_cells_per_model * len(model_jobs)} total generation(s)"
             )
+            if requested_batch_size != 1:
+                print(
+                    "[LoRA Tester] Forge Batch Size remains serialized to 1 for "
+                    "disk-spooling and recovery safety; Batch Count is preserved."
+                )
             return
 
         embedding_mode = test_type == self.TEST_TYPE_EMBEDDING
@@ -3005,6 +3454,54 @@ class LoRaTesterScript(scripts.Script):
                 self._block_generation(p, comparison_error)
                 return
 
+        seed_rounds = list(
+            getattr(p, self.BATCH_SEED_ROUNDS_ATTRIBUTE, None) or []
+        )
+        requested_batch_count = (
+            len(seed_rounds)
+            if seed_rounds
+            else max(1, int(getattr(p, 'n_iter', 1) or 1))
+        )
+        requested_batch_size = max(1, int(getattr(p, 'batch_size', 1) or 1))
+        if not seed_rounds and requested_batch_count > 1:
+            from modules.processing import get_fixed_seed
+
+            # Resolve random seeds once before Forge expands the comparison cases.
+            # This preserves Forge's seed progression while allowing every case in
+            # one Batch Count round to share the same seed.
+            requested_seed = getattr(p, 'seed', -1)
+            requested_subseed = getattr(p, 'subseed', -1)
+            if isinstance(requested_seed, list):
+                requested_seed = requested_seed[0] if requested_seed else -1
+            if isinstance(requested_subseed, list):
+                requested_subseed = requested_subseed[0] if requested_subseed else -1
+            p.seed = int(get_fixed_seed(requested_seed))
+            p.subseed = int(get_fixed_seed(requested_subseed))
+            seed_rounds = self._batch_seed_rounds(
+                p.seed,
+                p.subseed,
+                requested_batch_count,
+                getattr(p, 'subseed_strength', 0.0),
+            )
+        cells_per_seed_round = len(cases)
+        if seed_rounds:
+            expanded_case_count = len(cases) * len(seed_rounds)
+            if expanded_case_count > case_limit:
+                self._block_generation(
+                    p,
+                    f"Forge Batch Count expands this run to {expanded_case_count:,} "
+                    f"cells, above the {case_limit:,}-cell limit.",
+                )
+                return
+            cases = self._expand_cases_for_seed_rounds(
+                cases,
+                seed_rounds,
+                include_seed_label=not (
+                    bool(batch_model_label)
+                    and multi_model_overview_order == self.MULTI_OVERVIEW_SEEDS_FIRST
+                ),
+            )
+
         output_mode = self._processing_output_mode(p)
         try:
             session_dir, individual_output_dir = self._create_spool_directory(
@@ -3046,8 +3543,16 @@ class LoRaTesterScript(scripts.Script):
             'rows': [],
             'matrix_outputs': [],
             'reference_row': None,
+            'reference_rows': [],
             'fixed_seed': None,
             'fixed_subseed': None,
+            'requested_batch_count': requested_batch_count,
+            'requested_batch_size': requested_batch_size,
+            'cells_per_seed_round': cells_per_seed_round,
+            'requested_cells_per_model': len(cases),
+            'requested_generations': len(cases),
+            'seed_round_count': len(seed_rounds) if seed_rounds else 1,
+            'seed_rounds': seed_rounds,
         }
         setattr(p, self.PROCESSING_STATE_ATTRIBUTE, state)
         self._write_manifest(state, "generating")
@@ -3072,6 +3577,11 @@ class LoRaTesterScript(scripts.Script):
             f"{len(selected_items)} selected item(s)"
         )
         print(f"[LoRA Tester] Will generate {len(cases)} matrix cells total")
+        if requested_batch_size != 1:
+            print(
+                "[LoRA Tester] Forge Batch Size remains serialized to 1 for "
+                "disk-spooling and recovery safety; Batch Count is preserved."
+            )
 
     @staticmethod
     def _snapshot_forge_model_state():
@@ -3143,6 +3653,14 @@ class LoRaTesterScript(scripts.Script):
                     f"Model '{job['label']}' returned a missing or empty output page: "
                     f"{output_path}"
                 )
+            if self._is_multi_model_temporary_page(state, output_path):
+                temporary_pages = state.setdefault(
+                    'multi_model_temporary_pages',
+                    [],
+                )
+                normalized_path = str(output_path.resolve())
+                if normalized_path not in temporary_pages:
+                    temporary_pages.append(normalized_path)
             pages.append(str(output_path))
             infotexts.append(
                 source_infotexts[output_index]
@@ -3150,6 +3668,72 @@ class LoRaTesterScript(scripts.Script):
                 else fallback_infotext
             )
         return pages, infotexts
+
+    @staticmethod
+    def _is_multi_model_temporary_page(state, page_path):
+        """Recognize only extension-owned matrix pages below its spool root."""
+
+        try:
+            path = Path(page_path).resolve()
+            spool_root = Path(state['session_dir']).resolve().parent
+            relative = path.relative_to(spool_root)
+        except (KeyError, OSError, ValueError):
+            return False
+        return (
+            len(relative.parts) >= 2
+            and path.name.startswith(("matrix-", "model-"))
+        )
+
+    def _cleanup_multi_model_sources(self, state, protected_pages):
+        """Delete tracked temporary source grids after a validated final overview."""
+
+        protected = {
+            str(Path(path).resolve())
+            for path in protected_pages or []
+        }
+        spool_root = Path(state['session_dir']).resolve().parent
+        cleanup_complete = True
+        deleted = 0
+        source_parents = set()
+        for source_path in state.get('multi_model_temporary_pages', []):
+            source = Path(source_path)
+            try:
+                resolved = source.resolve()
+                resolved.relative_to(spool_root)
+            except (OSError, ValueError):
+                cleanup_complete = False
+                print(
+                    "[LoRA Tester] Refusing to remove an untrusted multi-model "
+                    f"source path: {source_path!r}"
+                )
+                continue
+            if str(resolved) in protected:
+                continue
+            source_parents.add(resolved.parent)
+            if self._safe_unlink(resolved):
+                deleted += 1
+            else:
+                cleanup_complete = False
+
+        for parent in sorted(
+            source_parents,
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            if parent == spool_root:
+                continue
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
+        state['multi_model_source_cleanup_complete'] = cleanup_complete
+        if deleted:
+            print(
+                f"[LoRA Tester] Removed {deleted} temporary per-model page(s) "
+                "after validating the shared overview"
+            )
+        return cleanup_complete
 
     @classmethod
     def _multi_model_page_geometry(cls, page_records, requested_columns, margin):
@@ -3231,13 +3815,19 @@ class LoRaTesterScript(scripts.Script):
         """Compose persisted per-model grids into shared comparison pages."""
 
         records = []
+        page_metadata = list(state.get('multi_model_page_records', []))
         for page_index, page_path in enumerate(source_pages):
             path = Path(page_path)
             if not path.is_file() or path.stat().st_size <= 0:
                 raise RuntimeError(f"Missing per-model page: {path}")
             with Image.open(path) as source:
                 width, height = source.size
-            records.append(
+            record = (
+                dict(page_metadata[page_index])
+                if page_index < len(page_metadata)
+                else {}
+            )
+            record.update(
                 {
                     'index': page_index,
                     'path': str(path),
@@ -3245,12 +3835,262 @@ class LoRaTesterScript(scripts.Script):
                     'height': int(height),
                 }
             )
+            records.append(record)
 
-        chunks = self._split_multi_model_overview_records(
-            records,
-            state.get('matrix_cols', 1),
-            state.get('matrix_margin', 0),
+        overview_order = state.get(
+            'multi_model_overview_order',
+            self.MULTI_OVERVIEW_MODELS_FIRST,
         )
+        seeds_first = overview_order == self.MULTI_OVERVIEW_SEEDS_FIRST
+
+        def integer_order(value, fallback):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return fallback
+
+        if seeds_first:
+            records.sort(
+                key=lambda record: (
+                    integer_order(record.get('seed_round'), 1_000_000),
+                    integer_order(record.get('model_index'), record['index']),
+                    integer_order(record.get('model_page_index'), record['index']),
+                )
+            )
+        else:
+            records.sort(
+                key=lambda record: (
+                    integer_order(record.get('model_index'), record['index']),
+                    integer_order(record.get('seed_round'), 1_000_000),
+                    integer_order(record.get('model_page_index'), record['index']),
+                )
+            )
+
+        requested_columns = max(1, int(state.get('matrix_cols', 1)))
+        seed_rounds = list(state.get('seed_rounds', []))
+        if not seeds_first and len(seed_rounds) > 1 and records:
+            pages_per_model_round = {}
+            for record in records:
+                key = (record.get('model_index'), record.get('seed_round'))
+                pages_per_model_round[key] = pages_per_model_round.get(key, 0) + 1
+            model_indexes = {record.get('model_index') for record in records}
+            expected_rounds = {int(round_info['index']) for round_info in seed_rounds}
+            one_page_per_round = all(
+                pages_per_model_round.get((model_index, round_index)) == 1
+                for model_index in model_indexes
+                for round_index in expected_rounds
+            )
+            if one_page_per_round:
+                # Preserve the maintainer's preferred comparison: one model per
+                # row, with that model's seed rounds occupying the columns.
+                requested_columns = len(seed_rounds)
+
+        background = ImageColor.getcolor(shared.opts.grid_background_color, "RGB")
+        margin = max(0, int(state.get('matrix_margin', 0)))
+        seed_label_font = None
+        seed_label_width = 0
+        seed_label_line_spacing = 0
+
+        def unique_seed_round(page_records):
+            chunk_rounds = list(
+                dict.fromkeys(
+                    record.get('seed_round')
+                    for record in page_records
+                    if record.get('seed_round') is not None
+                )
+            )
+            return chunk_rounds[0] if len(chunk_rounds) == 1 else None
+
+        def seed_row_geometry(rows):
+            page_records = [
+                record
+                for row_info in rows
+                for record in row_info['records']
+            ]
+            columns = max((len(row_info['records']) for row_info in rows), default=0)
+            cell_width = max(
+                (int(record['width']) for record in page_records),
+                default=0,
+            )
+            cell_height = max(
+                (int(record['height']) for record in page_records),
+                default=0,
+            )
+            image_width = (
+                cell_width * columns + margin * max(0, columns - 1)
+            )
+            return {
+                'columns': columns,
+                'rows': len(rows),
+                'cell_width': cell_width,
+                'cell_height': cell_height,
+                'seed_label_width': seed_label_width,
+                'width': seed_label_width + margin + image_width,
+                'height': (
+                    cell_height * len(rows) + margin * max(0, len(rows) - 1)
+                ),
+            }
+
+        def geometry_is_safe(geometry):
+            return (
+                geometry['width'] <= self.MAX_MATRIX_DIMENSION
+                and geometry['height'] <= self.MAX_MATRIX_DIMENSION
+                and geometry['width'] * geometry['height'] <= self.MAX_MATRIX_PIXELS
+            )
+
+        chunk_records = []
+        has_seed_metadata = any(
+            record.get('seed_round') is not None for record in records
+        )
+        if seeds_first and has_seed_metadata:
+            round_indexes = list(
+                dict.fromkeys(record.get('seed_round') for record in records)
+            )
+            seed_rows = []
+            for round_index in round_indexes:
+                round_records = [
+                    record
+                    for record in records
+                    if record.get('seed_round') == round_index
+                ]
+                matching_round = next(
+                    (
+                        round_info
+                        for round_info in seed_rounds
+                        if int(round_info['index']) == int(round_index)
+                    ),
+                    None,
+                )
+                if matching_round is not None:
+                    label = str(matching_round['label'])
+                elif round_records and round_records[0].get('seed') is not None:
+                    label = f"Seed {int(round_records[0]['seed'])}"
+                else:
+                    label = f"Seed round {integer_order(round_index, 0) + 1}"
+                seed_rows.append(
+                    {
+                        'seed_round': round_index,
+                        'label': label,
+                        'records': round_records,
+                    }
+                )
+
+            cell_width = max(int(record['width']) for record in records)
+            cell_height = max(int(record['height']) for record in records)
+            font_size = max(
+                self.LABEL_MIN_FONT_SIZE,
+                (cell_width + cell_height) // self.LABEL_FONT_DIVISOR,
+            )
+            seed_label_font = images.get_font(font_size)
+            seed_label_line_spacing = max(2, font_size // 5)
+            label_padding = max(8, font_size // 2)
+            scratch = Image.new("RGB", (1, 1), background)
+            try:
+                calculator = ImageDraw.Draw(scratch)
+                maximum_label_width = 0
+                for row_info in seed_rows:
+                    row_info['label_lines'] = str(row_info['label']).replace(
+                        " / ",
+                        "\n",
+                    ).splitlines()
+                    for line in row_info['label_lines']:
+                        bbox = calculator.textbbox((0, 0), line, font=seed_label_font)
+                        maximum_label_width = max(
+                            maximum_label_width,
+                            bbox[2] - bbox[0],
+                        )
+                seed_label_width = maximum_label_width + label_padding * 2
+            finally:
+                scratch.close()
+
+            maximum_row_columns = max(
+                (len(row_info['records']) for row_info in seed_rows),
+                default=0,
+            )
+            safe_row_columns = 0
+            for column_count in range(1, maximum_row_columns + 1):
+                candidate_width = (
+                    seed_label_width
+                    + margin
+                    + cell_width * column_count
+                    + margin * max(0, column_count - 1)
+                )
+                if (
+                    candidate_width <= self.MAX_MATRIX_DIMENSION
+                    and cell_height <= self.MAX_MATRIX_DIMENSION
+                    and candidate_width * cell_height <= self.MAX_MATRIX_PIXELS
+                ):
+                    safe_row_columns = column_count
+                else:
+                    break
+            if safe_row_columns <= 0:
+                raise RuntimeError(
+                    "A seed-first model row exceeds the matrix limits even with "
+                    "one model page"
+                )
+
+            row_segments = []
+            for row_info in seed_rows:
+                for start in range(0, len(row_info['records']), safe_row_columns):
+                    row_segments.append(
+                        {
+                            **row_info,
+                            'records': row_info['records'][
+                                start:start + safe_row_columns
+                            ],
+                        }
+                    )
+
+            page_rows = []
+            for row_info in row_segments:
+                candidate_rows = page_rows + [row_info]
+                if geometry_is_safe(seed_row_geometry(candidate_rows)):
+                    page_rows = candidate_rows
+                    continue
+                if page_rows:
+                    page_records = [
+                        record
+                        for page_row in page_rows
+                        for record in page_row['records']
+                    ]
+                    chunk_records.append(
+                        {
+                            'seed_round': unique_seed_round(page_records),
+                            'records': page_records,
+                            'seed_rows': page_rows,
+                        }
+                    )
+                page_rows = [row_info]
+                if not geometry_is_safe(seed_row_geometry(page_rows)):
+                    raise RuntimeError(
+                        "A seed-first model row exceeds the matrix limits"
+                    )
+            if page_rows:
+                page_records = [
+                    record
+                    for page_row in page_rows
+                    for record in page_row['records']
+                ]
+                chunk_records.append(
+                    {
+                        'seed_round': unique_seed_round(page_records),
+                        'records': page_records,
+                        'seed_rows': page_rows,
+                    }
+                )
+        else:
+            for chunk in self._split_multi_model_overview_records(
+                records,
+                requested_columns,
+                margin,
+            ):
+                chunk_records.append(
+                    {
+                        'seed_round': unique_seed_round(chunk),
+                        'records': chunk,
+                    }
+                )
+
         model_labels = [
             result.get('label') or result.get('title') or result.get('checkpoint')
             for result in state.get('model_results', [])
@@ -3258,65 +4098,171 @@ class LoRaTesterScript(scripts.Script):
         ]
         model_summary = ", ".join(str(label) for label in model_labels if label)
         base_infotext = source_infotexts[0] if source_infotexts else ""
-        grid_info = base_infotext or "LoRA Tester multi-model comparison"
-        if model_summary:
-            grid_info += f"\nLoRA Tester models: {model_summary}"
 
-        background = ImageColor.getcolor(shared.opts.grid_background_color, "RGB")
-        margin = max(0, int(state.get('matrix_margin', 0)))
         page_paths = []
-        for page_number, chunk in enumerate(chunks, start=1):
-            geometry = self._multi_model_page_geometry(
-                chunk,
-                state.get('matrix_cols', 1),
-                margin,
+        page_infotexts = []
+        state['multi_model_overview_metadata'] = []
+        for page_number, chunk_info in enumerate(chunk_records, start=1):
+            chunk = chunk_info['records']
+            seed_rows = chunk_info.get('seed_rows')
+            geometry = (
+                seed_row_geometry(seed_rows)
+                if seed_rows is not None
+                else self._multi_model_page_geometry(
+                    chunk,
+                    requested_columns,
+                    margin,
+                )
             )
+            page_seeds = list(dict.fromkeys(
+                int(record['seed'])
+                for record in chunk
+                if record.get('seed') is not None
+            ))
+            page_subseeds = list(dict.fromkeys(
+                int(record['subseed'])
+                for record in chunk
+                if record.get('subseed') is not None
+            ))
+            page_seed = page_seeds[0] if len(page_seeds) == 1 else -1
+            page_subseed = page_subseeds[0] if len(page_subseeds) == 1 else -1
+            source_index = integer_order(chunk[0].get('index'), -1)
+            if 0 <= source_index < len(source_infotexts):
+                page_info = source_infotexts[source_index]
+            else:
+                page_info = base_infotext
+            page_info = page_info or "LoRA Tester multi-model comparison"
+            if model_summary:
+                page_info += f"\nLoRA Tester models: {model_summary}"
+            page_info += f"\nLoRA Tester overview: {overview_order}"
+            if chunk_info['seed_round'] is not None:
+                matching_round = next(
+                    (
+                        round_info
+                        for round_info in seed_rounds
+                        if int(round_info['index'])
+                        == int(chunk_info['seed_round'])
+                    ),
+                    None,
+                )
+                if matching_round is not None:
+                    page_info += f"\nLoRA Tester seed round: {matching_round['label']}"
+            if page_seeds:
+                page_info += "\nLoRA Tester page seeds: " + ", ".join(
+                    str(seed) for seed in page_seeds
+                )
+                if page_seed == -1:
+                    page_info += "\nLoRA Tester page seed metadata: mixed (-1)"
+            if page_subseeds:
+                page_info += "\nLoRA Tester page subseeds: " + ", ".join(
+                    str(subseed) for subseed in page_subseeds
+                )
+
             canvas = Image.new(
                 "RGB",
                 (geometry['width'], geometry['height']),
                 background,
             )
             try:
-                for chunk_index, record in enumerate(chunk):
-                    column = chunk_index % geometry['columns']
-                    row = chunk_index // geometry['columns']
-                    with Image.open(record['path']) as source:
-                        source.load()
-                        converted = (
-                            source if source.mode == "RGB" else source.convert("RGB")
+                if seed_rows is not None:
+                    text_color = ImageColor.getcolor(
+                        getattr(shared.opts, 'grid_text_active_color', '#000000'),
+                        "RGB",
+                    )
+                    drawing = ImageDraw.Draw(canvas)
+                    for row, row_info in enumerate(seed_rows):
+                        row_y = row * (geometry['cell_height'] + margin)
+                        label_lines = row_info.get('label_lines') or [
+                            str(row_info['label'])
+                        ]
+                        line_boxes = [
+                            drawing.textbbox((0, 0), line, font=seed_label_font)
+                            for line in label_lines
+                        ]
+                        line_heights = [
+                            max(1, bbox[3] - bbox[1]) for bbox in line_boxes
+                        ]
+                        block_height = sum(line_heights) + seed_label_line_spacing * max(
+                            0,
+                            len(label_lines) - 1,
                         )
-                        x = (
-                            column * (geometry['cell_width'] + margin)
-                            + (geometry['cell_width'] - converted.width) // 2
-                        )
-                        y = (
-                            row * (geometry['cell_height'] + margin)
-                            + (geometry['cell_height'] - converted.height) // 2
-                        )
-                        canvas.paste(converted, (x, y))
-                        if converted is not source:
-                            converted.close()
+                        draw_y = row_y + (geometry['cell_height'] - block_height) // 2
+                        for line, bbox, line_height in zip(
+                            label_lines,
+                            line_boxes,
+                            line_heights,
+                        ):
+                            text_width = bbox[2] - bbox[0]
+                            drawing.text(
+                                (
+                                    (seed_label_width - text_width) / 2 - bbox[0],
+                                    draw_y - bbox[1],
+                                ),
+                                line,
+                                font=seed_label_font,
+                                fill=text_color,
+                            )
+                            draw_y += line_height + seed_label_line_spacing
+
+                        for column, record in enumerate(row_info['records']):
+                            with Image.open(record['path']) as source:
+                                source.load()
+                                converted = (
+                                    source
+                                    if source.mode == "RGB"
+                                    else source.convert("RGB")
+                                )
+                                x = (
+                                    seed_label_width
+                                    + margin
+                                    + column * (geometry['cell_width'] + margin)
+                                    + (geometry['cell_width'] - converted.width) // 2
+                                )
+                                y = (
+                                    row_y
+                                    + (geometry['cell_height'] - converted.height) // 2
+                                )
+                                canvas.paste(converted, (x, y))
+                                if converted is not source:
+                                    converted.close()
+                else:
+                    for chunk_index, record in enumerate(chunk):
+                        column = chunk_index % geometry['columns']
+                        row = chunk_index // geometry['columns']
+                        with Image.open(record['path']) as source:
+                            source.load()
+                            converted = (
+                                source
+                                if source.mode == "RGB"
+                                else source.convert("RGB")
+                            )
+                            x = (
+                                column * (geometry['cell_width'] + margin)
+                                + (geometry['cell_width'] - converted.width) // 2
+                            )
+                            y = (
+                                row * (geometry['cell_height'] + margin)
+                                + (geometry['cell_height'] - converted.height) // 2
+                            )
+                            canvas.paste(converted, (x, y))
+                            if converted is not source:
+                                converted.close()
 
                 if getattr(shared.opts, 'grid_save', False):
-                    seed_values = list(getattr(processed, 'all_seeds', []) or [])
                     prompt_values = list(getattr(processed, 'all_prompts', []) or [])
                     session_name = Path(state['session_dir']).name
                     page_path, _ = images.save_image(
                         canvas,
                         p.outpath_grids,
                         "lora_tester_multi_model_overview",
-                        seed=(
-                            seed_values[0]
-                            if seed_values
-                            else state.get('fixed_seed', -1)
-                        ),
+                        seed=page_seed,
                         prompt=(
                             prompt_values[0]
                             if prompt_values
                             else str(p.prompt)
                         ),
                         extension=shared.opts.grid_format,
-                        info=grid_info,
+                        info=page_info,
                         grid=True,
                         p=p,
                         suffix=f"-page-{page_number:03d}",
@@ -3331,21 +4277,37 @@ class LoRaTesterScript(scripts.Script):
                         f"matrix-multi-model-overview-page-{page_number:03d}.png"
                     )
                     parameters = (
-                        grid_info
+                        page_info
                         if getattr(shared.opts, 'enable_pnginfo', False)
                         else None
                     )
                     self._save_png_atomic(canvas, page_path, parameters=parameters)
                 page_paths.append(str(page_path))
+                page_infotexts.append(page_info)
+                state['multi_model_overview_metadata'].append(
+                    {
+                        'path': str(page_path),
+                        'seed_round': chunk_info['seed_round'],
+                        'seed': page_seed,
+                        'subseed': page_subseed,
+                        'seeds': page_seeds,
+                        'subseeds': page_subseeds,
+                        'source_page_count': len(chunk),
+                        'layout': 'seed-rows' if seed_rows is not None else 'grid',
+                        'columns': geometry['columns'],
+                        'rows': geometry['rows'],
+                        'seed_label_width': geometry.get('seed_label_width', 0),
+                    }
+                )
             finally:
                 canvas.close()
 
         self._validate_matrix_pages(page_paths)
         print(
             f"[LoRA Tester] Combined {len(source_pages)} per-model page(s) into "
-            f"{len(page_paths)} shared overview page(s)"
+            f"{len(page_paths)} shared overview page(s) using {overview_order}"
         )
-        return page_paths, [grid_info] * len(page_paths)
+        return page_paths, page_infotexts
 
     def _run_multi_model_jobs(self, p, state, arguments):
         """Run the normal single-model tester once per checkpoint, strictly serially."""
@@ -3360,6 +4322,19 @@ class LoRaTesterScript(scripts.Script):
         )
         state['fixed_seed'] = fixed_seed
         state['fixed_subseed'] = fixed_subseed
+        seed_rounds = self._batch_seed_rounds(
+            fixed_seed,
+            fixed_subseed,
+            state.get('requested_batch_count', 1),
+            getattr(p, 'subseed_strength', 0.0),
+        )
+        state['seed_rounds'] = seed_rounds
+        total_progress_jobs = max(1, int(state.get('requested_generations', 1)))
+        state['progress_job_count'] = total_progress_jobs
+        # The nested process_images() calls share Forge's one outer State. Seed the
+        # complete job total before the first nested job so job_no can advance across
+        # every checkpoint without the progress bar exceeding 100 percent.
+        shared.state.job_count = total_progress_jobs
         self._write_manifest(state, "models-running")
 
         try:
@@ -3386,11 +4361,12 @@ class LoRaTesterScript(scripts.Script):
                 )
                 job_p.override_settings['sd_model_checkpoint'] = job['checkpoint']
                 job_p.override_settings_restore_afterwards = True
-                job_p.n_iter = 1
+                job_p.n_iter = len(seed_rounds)
                 job_p.batch_size = 1
                 job_p.seed = fixed_seed
                 job_p.subseed = fixed_subseed
                 setattr(job_p, self.BATCH_MODEL_LABEL_ATTRIBUTE, job['label'])
+                setattr(job_p, self.BATCH_SEED_ROUNDS_ATTRIBUTE, seed_rounds)
 
                 nested_script_args = list(p.script_args)
                 nested_arguments = self._prepare_multi_model_job_arguments(
@@ -3431,29 +4407,75 @@ class LoRaTesterScript(scripts.Script):
                     source_subseeds = list(
                         getattr(nested_processed, 'all_subseeds', []) or []
                     )
-                    state['multi_model_prompts'].extend(
-                        [source_prompts[0] if source_prompts else str(p.prompt)]
+                    page_prompts = (
+                        source_prompts[:page_count]
+                        if len(source_prompts) >= page_count
+                        else [source_prompts[0] if source_prompts else str(p.prompt)]
                         * page_count
                     )
-                    state['multi_model_negative_prompts'].extend(
-                        [
+                    page_negative_prompts = (
+                        source_negative_prompts[:page_count]
+                        if len(source_negative_prompts) >= page_count
+                        else [
                             source_negative_prompts[0]
                             if source_negative_prompts
                             else str(p.negative_prompt)
                         ]
                         * page_count
                     )
-                    state['multi_model_seeds'].extend(
-                        [source_seeds[0] if source_seeds else fixed_seed] * page_count
+                    page_seeds = (
+                        source_seeds[:page_count]
+                        if len(source_seeds) >= page_count
+                        else [source_seeds[0] if source_seeds else fixed_seed]
+                        * page_count
                     )
-                    state['multi_model_subseeds'].extend(
-                        [
+                    page_subseeds = (
+                        source_subseeds[:page_count]
+                        if len(source_subseeds) >= page_count
+                        else [
                             source_subseeds[0]
                             if source_subseeds
                             else fixed_subseed
                         ]
                         * page_count
                     )
+                    state['multi_model_prompts'].extend(page_prompts)
+                    state['multi_model_negative_prompts'].extend(
+                        page_negative_prompts
+                    )
+                    state['multi_model_seeds'].extend(page_seeds)
+                    state['multi_model_subseeds'].extend(page_subseeds)
+
+                    for page_index, page_path in enumerate(pages):
+                        page_seed = int(page_seeds[page_index])
+                        page_subseed = int(page_subseeds[page_index])
+                        matching_round = next(
+                            (
+                                round_info
+                                for round_info in seed_rounds
+                                if int(round_info['seed']) == page_seed
+                                and int(round_info['subseed']) == page_subseed
+                            ),
+                            None,
+                        )
+                        state.setdefault('multi_model_page_records', []).append(
+                            {
+                                'path': str(page_path),
+                                'infotext': infotexts[page_index],
+                                'model_index': model_index,
+                                'model_label': job['label'],
+                                'model_page_index': page_index,
+                                'seed_round': (
+                                    int(matching_round['index'])
+                                    if matching_round is not None
+                                    else None
+                                ),
+                                'seed': page_seed,
+                                'subseed': page_subseed,
+                                'prompt': page_prompts[page_index],
+                                'negative_prompt': page_negative_prompts[page_index],
+                            }
+                        )
                     result['status'] = 'complete'
                     result['pages'] = pages
                 except Exception as error:
@@ -3523,20 +4545,39 @@ class LoRaTesterScript(scripts.Script):
             self._run_multi_model_jobs(p, state, args)
             return
 
-        if p.all_seeds:
+        explicit_seeds = [case.get('seed') for case in state.get('cases', [])]
+        if explicit_seeds and all(seed is not None for seed in explicit_seeds):
+            state['fixed_seed'] = int(explicit_seeds[0])
+            p.all_seeds = [int(seed) for seed in explicit_seeds]
+        elif p.all_seeds:
             state['fixed_seed'] = int(p.all_seeds[0])
             p.all_seeds = [state['fixed_seed']] * len(p.all_prompts)
-        if p.all_subseeds:
+
+        explicit_subseeds = [
+            case.get('subseed') for case in state.get('cases', [])
+        ]
+        if explicit_subseeds and all(
+            subseed is not None for subseed in explicit_subseeds
+        ):
+            state['fixed_subseed'] = int(explicit_subseeds[0])
+            p.all_subseeds = [int(subseed) for subseed in explicit_subseeds]
+        elif p.all_subseeds:
             state['fixed_subseed'] = int(p.all_subseeds[0])
             p.all_subseeds = [state['fixed_subseed']] * len(p.all_prompts)
 
         self._write_manifest(state, "seed-fixed")
-        if state.get('fixed_seed') is not None:
+        if int(state.get('seed_round_count', 1)) > 1:
+            seed_labels = ", ".join(
+                str(round_info.get('label'))
+                for round_info in state.get('seed_rounds', [])
+            )
+            print(f"[LoRA Tester] Fixed comparison seed rounds: {seed_labels}")
+        elif state.get('fixed_seed') is not None:
             print(f"[LoRA Tester] Fixed comparison seed: {state['fixed_seed']}")
 
     @staticmethod
     def _force_batch_rng_seed(p, state, batch_number, seeds, subseeds):
-        """Replace Forge's already-created per-iteration RNG with the first seed."""
+        """Replace Forge's per-iteration RNG with the current comparison seed."""
 
         if state.get('fixed_seed') is None:
             source_seeds = getattr(p, 'all_seeds', None) or seeds
@@ -3544,13 +4585,18 @@ class LoRaTesterScript(scripts.Script):
                 return
             state['fixed_seed'] = int(source_seeds[0])
 
-        fixed_seed = state['fixed_seed']
+        case = (
+            state.get('cases', [])[batch_number]
+            if batch_number < len(state.get('cases', []))
+            else {}
+        )
+        fixed_seed = int(case.get('seed', state['fixed_seed']))
         if seeds is None:
             seeds = []
         seeds[:] = [fixed_seed] * len(seeds)
         p.seeds = seeds
 
-        fixed_subseed = state.get('fixed_subseed')
+        fixed_subseed = case.get('subseed', state.get('fixed_subseed'))
         if fixed_subseed is None:
             source_subseeds = getattr(p, 'all_subseeds', None) or subseeds
             if source_subseeds:
@@ -3806,6 +4852,10 @@ class LoRaTesterScript(scripts.Script):
                 'item_label': case.get('item_label'),
                 'trigger_words': list(case.get('trigger_words', [])),
                 'weight': case.get('weight'),
+                'kind': case.get('kind'),
+                'seed_round': case.get('seed_round', 0),
+                'seed': case.get('seed'),
+                'subseed': case.get('subseed'),
                 'is_baseline': self._case_is_baseline(case),
                 'width': int(original.width),
                 'height': int(original.height),
@@ -3882,18 +4932,36 @@ class LoRaTesterScript(scripts.Script):
         negative_values = list(state.get('multi_model_negative_prompts', []))
         seed_values = list(state.get('multi_model_seeds', []))
         subseed_values = list(state.get('multi_model_subseeds', []))
-        processed.all_prompts = [
-            prompt_values[0] if prompt_values else str(p.prompt)
-        ] * len(pages)
-        processed.all_negative_prompts = [
-            negative_values[0] if negative_values else str(p.negative_prompt)
-        ] * len(pages)
-        processed.all_seeds = [
-            seed_values[0] if seed_values else state.get('fixed_seed', -1)
-        ] * len(pages)
-        processed.all_subseeds = [
-            subseed_values[0] if subseed_values else state.get('fixed_subseed', -1)
-        ] * len(pages)
+        overview_metadata = list(
+            state.get('multi_model_overview_metadata', [])
+        )
+
+        def page_values(values, fallback):
+            if len(values) >= len(pages):
+                return values[:len(pages)]
+            return [values[0] if values else fallback] * len(pages)
+
+        processed.all_prompts = page_values(prompt_values, str(p.prompt))
+        processed.all_negative_prompts = page_values(
+            negative_values,
+            str(p.negative_prompt),
+        )
+        if len(overview_metadata) == len(pages):
+            processed.all_seeds = [
+                int(metadata.get('seed', -1)) for metadata in overview_metadata
+            ]
+            processed.all_subseeds = [
+                int(metadata.get('subseed', -1)) for metadata in overview_metadata
+            ]
+        else:
+            processed.all_seeds = page_values(
+                seed_values,
+                state.get('fixed_seed', -1),
+            )
+            processed.all_subseeds = page_values(
+                subseed_values,
+                state.get('fixed_subseed', -1),
+            )
 
         failures = [
             result
@@ -3940,11 +5008,20 @@ class LoRaTesterScript(scripts.Script):
         manifest_path = state.get('manifest_path')
         session_dir = Path(state['session_dir'])
         if all_complete:
-            self._safe_unlink(manifest_path)
-            try:
-                session_dir.rmdir()
-            except OSError:
-                pass
+            cleanup_complete = self._cleanup_multi_model_sources(state, pages)
+            if cleanup_complete:
+                self._safe_unlink(manifest_path)
+                try:
+                    session_dir.rmdir()
+                except OSError:
+                    pass
+            else:
+                state['cleanup_incomplete'] = True
+                self._write_manifest(state, "multi-model-cleanup-incomplete")
+                processed.comments += (
+                    "\nLoRA Tester: the shared overview is complete, but one or more "
+                    "temporary per-model pages could not be removed."
+                )
         else:
             print(
                 f"[LoRA Tester] Multiple-model recovery manifest retained in "
@@ -3970,7 +5047,8 @@ class LoRaTesterScript(scripts.Script):
                    matrix_cols, matrix_margin,
                    output_retention,
                    unload_models_before_matrix,
-                   multi_model_mode=None, checkpoint_selection=None):
+                   multi_model_mode=None, checkpoint_selection=None,
+                   multi_model_overview_order=None):
         """Build safety-bounded matrix pages from disk-spooled generation cells."""
 
         state = getattr(p, self.PROCESSING_STATE_ATTRIBUTE, None)
@@ -4021,39 +5099,56 @@ class LoRaTesterScript(scripts.Script):
 
             self._unload_forge_model_for_matrix(p, state)
 
-            reference_cell = next(
-                (cell for cell in cells if cell.get('is_baseline')),
-                None,
-            )
-            comparison_cells = [
-                cell for cell in cells if cell is not reference_cell
-            ]
-            reference_row = None
-            if reference_cell is not None:
-                reference_rows = self._build_row_strips(
-                    state,
-                    [reference_cell],
-                    columns=1,
-                    filename_prefix="reference-row",
-                    track_as_matrix_rows=False,
+            if int(state.get('seed_round_count', 1)) > 1:
+                print(
+                    f"[LoRA Tester] Preparing independent matrices for "
+                    f"{state['seed_round_count']} Forge Batch Count seed rounds"
                 )
-                reference_row = reference_rows[0]
-                state['reference_row'] = reference_row
+                page_paths, page_seeds, page_subseeds = (
+                    self._build_seed_round_matrix_pages(
+                        state,
+                        cells,
+                        p,
+                        processed,
+                        grid_info,
+                    )
+                )
+                processed.all_seeds = page_seeds
+                processed.all_subseeds = page_subseeds
+            else:
+                reference_cell = next(
+                    (cell for cell in cells if cell.get('is_baseline')),
+                    None,
+                )
+                comparison_cells = [
+                    cell for cell in cells if cell is not reference_cell
+                ]
+                reference_row = None
+                if reference_cell is not None:
+                    reference_rows = self._build_row_strips(
+                        state,
+                        [reference_cell],
+                        columns=1,
+                        filename_prefix="reference-row",
+                        track_as_matrix_rows=False,
+                    )
+                    reference_row = reference_rows[0]
+                    state['reference_row'] = reference_row
 
-            print(
-                f"[LoRA Tester] Preparing requested matrices for "
-                f"{len(self._group_comparison_cells(comparison_cells))} tested item(s), "
-                f"{state['matrix_cols']} standard-overview columns; reference image: "
-                f"{'repeated on every page' if reference_row else 'disabled'}"
-            )
-            page_paths = self._build_requested_matrices(
-                state,
-                comparison_cells,
-                p,
-                processed,
-                grid_info,
-                reference_row=reference_row,
-            )
+                print(
+                    f"[LoRA Tester] Preparing requested matrices for "
+                    f"{len(self._group_comparison_cells(comparison_cells))} tested item(s), "
+                    f"{state['matrix_cols']} standard-overview columns; reference image: "
+                    f"{'repeated on every page' if reference_row else 'disabled'}"
+                )
+                page_paths = self._build_requested_matrices(
+                    state,
+                    comparison_cells,
+                    p,
+                    processed,
+                    grid_info,
+                    reference_row=reference_row,
+                )
             self._validate_matrix_pages(page_paths)
 
             processed.images = [str(path) for path in page_paths]
@@ -4079,12 +5174,14 @@ class LoRaTesterScript(scripts.Script):
             )
         except Exception as error:
             self._write_manifest(state, "matrix-error")
-            reference_path = (state.get('reference_row') or {}).get('path')
-            fallback_paths = (
-                [reference_path]
-                if reference_path and Path(reference_path).exists()
-                else []
-            )
+            reference_rows = list(state.get('reference_rows', []))
+            if not reference_rows and state.get('reference_row'):
+                reference_rows = [state['reference_row']]
+            fallback_paths = [
+                row['path']
+                for row in reference_rows
+                if row.get('path') and Path(row['path']).exists()
+            ]
             fallback_paths.extend(
                 [
                     row['path']
@@ -4138,6 +5235,10 @@ class LoRaTesterScript(scripts.Script):
                 'item_label': case.get('item_label'),
                 'trigger_words': list(case.get('trigger_words', [])),
                 'weight': case.get('weight'),
+                'kind': case.get('kind'),
+                'seed_round': case.get('seed_round', 0),
+                'seed': case.get('seed'),
+                'subseed': case.get('subseed'),
                 'is_baseline': self._case_is_baseline(case),
                 'width': int(image.width),
                 'height': int(image.height),
@@ -4224,6 +5325,7 @@ class LoRaTesterScript(scripts.Script):
         processed,
         grid_info,
         reference_row=None,
+        output_slug_prefix=None,
     ):
         """Build aligned comparison pages without splitting an item/weight axis."""
 
@@ -4252,6 +5354,9 @@ class LoRaTesterScript(scripts.Script):
             )
 
         total_weights = len(groups[0]['cells'])
+        slug_prefix = (
+            f"{str(output_slug_prefix).strip('-')}-" if output_slug_prefix else ""
+        )
         page_paths = []
         for part_number, start in enumerate(range(0, total_weights, capacity), start=1):
             end = min(total_weights, start + capacity)
@@ -4264,7 +5369,7 @@ class LoRaTesterScript(scripts.Script):
                             group['cells'][start:end],
                             columns=end - start,
                             filename_prefix=(
-                                f"comparison-rows-part-{part_number:03d}-"
+                                f"{slug_prefix}comparison-rows-part-{part_number:03d}-"
                                 f"item-{item_number:02d}"
                             ),
                         )
@@ -4278,7 +5383,7 @@ class LoRaTesterScript(scripts.Script):
                             [group['cells'][weight_index] for group in groups],
                             columns=len(groups),
                             filename_prefix=(
-                                f"comparison-columns-part-{part_number:03d}-"
+                                f"{slug_prefix}comparison-columns-part-{part_number:03d}-"
                                 f"weight-{weight_index:03d}"
                             ),
                         )
@@ -4296,7 +5401,7 @@ class LoRaTesterScript(scripts.Script):
                     "after its real labels were measured; reduce the range or source "
                     "resolution"
                 )
-            slug = f"combined-comparison-part-{part_number:03d}"
+            slug = f"{slug_prefix}combined-comparison-part-{part_number:03d}"
             pages = self._build_matrix_pages(
                 state,
                 rows,
@@ -4412,12 +5517,14 @@ class LoRaTesterScript(scripts.Script):
         processed,
         grid_info,
         reference_row=None,
+        output_slug_prefix=None,
     ):
         """Build per-item grids first and append the optional combined overview."""
 
         page_paths = []
         state['matrix_outputs'] = []
         groups = self._group_comparison_cells(comparison_cells)
+        slug_prefix = f"{str(output_slug_prefix).strip('-')}-" if output_slug_prefix else ""
 
         def record_pages(kind, slug, paths, item_key=None, item_label=None):
             for page_number, path in enumerate(paths, start=1):
@@ -4441,6 +5548,7 @@ class LoRaTesterScript(scripts.Script):
                     group['item_label'],
                     ordinal,
                 )
+                slug = f"{slug_prefix}{slug}"
                 item_pages = self._build_per_item_matrix_pages(
                     state,
                     group,
@@ -4464,7 +5572,7 @@ class LoRaTesterScript(scripts.Script):
                 combined_rows = self._build_row_strips(
                     state,
                     comparison_cells,
-                    filename_prefix="combined-row",
+                    filename_prefix=f"{slug_prefix}combined-row",
                 )
                 combined_pages = self._build_matrix_pages(
                     state,
@@ -4473,7 +5581,7 @@ class LoRaTesterScript(scripts.Script):
                     processed,
                     grid_info,
                     reference_row=reference_row,
-                    output_slug="combined-overview",
+                    output_slug=f"{slug_prefix}combined-overview",
                     output_description="combined overview",
                 )
             else:
@@ -4484,8 +5592,13 @@ class LoRaTesterScript(scripts.Script):
                     processed,
                     grid_info,
                     reference_row=reference_row,
+                    output_slug_prefix=output_slug_prefix,
                 )
-            record_pages("combined", "combined-overview", combined_pages)
+            record_pages(
+                "combined",
+                f"{slug_prefix}combined-overview",
+                combined_pages,
+            )
         elif groups:
             print("[LoRA Tester] Combined overview disabled; returning individual grids only")
 
@@ -4497,12 +5610,94 @@ class LoRaTesterScript(scripts.Script):
                 processed,
                 grid_info,
                 reference_row=reference_row,
-                output_slug="reference-recovery",
+                output_slug=f"{slug_prefix}reference-recovery",
                 output_description="reference recovery",
             )
-            record_pages("reference", "reference-recovery", reference_pages)
+            record_pages(
+                "reference",
+                f"{slug_prefix}reference-recovery",
+                reference_pages,
+            )
 
         return page_paths
+
+    def _build_seed_round_matrix_pages(
+        self,
+        state,
+        cells,
+        p,
+        processed,
+        grid_info,
+    ):
+        """Build independent matrix output for each preserved Forge Batch Count seed."""
+
+        page_paths = []
+        page_seeds = []
+        page_subseeds = []
+        state['rows'] = []
+        state['matrix_outputs'] = []
+        state['reference_rows'] = []
+
+        for round_info in state.get('seed_rounds', []):
+            round_index = int(round_info['index'])
+            round_cells = [
+                cell
+                for cell in cells
+                if int(cell.get('seed_round', 0)) == round_index
+            ]
+            if not round_cells:
+                continue
+
+            round_state = dict(state)
+            round_state['rows'] = []
+            round_state['matrix_outputs'] = []
+            reference_cell = next(
+                (cell for cell in round_cells if cell.get('is_baseline')),
+                None,
+            )
+            comparison_cells = [
+                cell for cell in round_cells if cell is not reference_cell
+            ]
+            prefix = (
+                f"seed-round-{round_index + 1:03d}-"
+                f"seed-{int(round_info['seed'])}"
+            )
+            reference_row = None
+            if reference_cell is not None:
+                reference_rows = self._build_row_strips(
+                    round_state,
+                    [reference_cell],
+                    columns=1,
+                    filename_prefix=f"{prefix}-reference-row",
+                    track_as_matrix_rows=False,
+                )
+                reference_row = reference_rows[0]
+                round_state['reference_row'] = reference_row
+                state['reference_rows'].append(reference_row)
+                if state.get('reference_row') is None:
+                    state['reference_row'] = reference_row
+
+            round_pages = self._build_requested_matrices(
+                round_state,
+                comparison_cells,
+                p,
+                processed,
+                grid_info,
+                reference_row=reference_row,
+                output_slug_prefix=prefix,
+            )
+            for output in round_state.get('matrix_outputs', []):
+                output['seed_round'] = round_index
+                output['seed'] = int(round_info['seed'])
+                output['subseed'] = int(round_info['subseed'])
+            state['rows'].extend(round_state.get('rows', []))
+            state['matrix_outputs'].extend(round_state.get('matrix_outputs', []))
+            page_paths.extend(round_pages)
+            page_seeds.extend([int(round_info['seed'])] * len(round_pages))
+            page_subseeds.extend([int(round_info['subseed'])] * len(round_pages))
+            self._write_manifest(state, "matrix-pages")
+
+        return page_paths, page_seeds, page_subseeds
 
     @staticmethod
     def _text_width(drawing, text, font):
@@ -4963,9 +6158,18 @@ class LoRaTesterScript(scripts.Script):
             if row_path and str(Path(row_path).resolve()) not in protected:
                 cleanup_complete = self._safe_unlink(row_path) and cleanup_complete
 
-        reference_row = state.get('reference_row') or {}
-        reference_path = reference_row.get('path')
-        if reference_path and str(Path(reference_path).resolve()) not in protected:
+        reference_rows = list(state.get('reference_rows', []))
+        if not reference_rows and state.get('reference_row'):
+            reference_rows = [state['reference_row']]
+        cleaned_reference_paths = set()
+        for reference_row in reference_rows:
+            reference_path = reference_row.get('path')
+            if not reference_path:
+                continue
+            resolved = str(Path(reference_path).resolve())
+            if resolved in protected or resolved in cleaned_reference_paths:
+                continue
+            cleaned_reference_paths.add(resolved)
             cleanup_complete = self._safe_unlink(reference_path) and cleanup_complete
 
         if state.get('recovery_retained'):

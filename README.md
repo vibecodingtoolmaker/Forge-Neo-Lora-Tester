@@ -40,12 +40,12 @@ affiliated with or endorsed by OpenAI.
 
 - Loads the LoRA list automatically on first activation
 - Filters LoRAs by non-empty model folders, with optional subfolder inclusion
-- Offers manual selection across the complete LoRA directory
+- Offers manual selection across Forge's primary and additional LoRA directories
 - Reads LoRA trigger words from neighboring `.json`/`.civitai.info` metadata and
   Embedding triggers from `.json` with a filename fallback
 - Supports per-LoRA/per-Embedding trigger text and weight overrides
 - Supports positive and negative weights and inclusive ranges such as `-3:3:0.5`
-- Uses the first generated seed for every comparison cell
+- Uses one resolved seed for every comparison cell within each Batch Count round
 - Generates a fixed-seed reference image without a tested LoRA by default
 - Repeats that reference image at the top of every matrix page
 - Optionally creates a separate horizontal weight row for every tested LoRA or
@@ -57,7 +57,7 @@ affiliated with or endorsed by OpenAI.
 - Organizes setup into four workflow tabs: Selection, Models & Run Size, Grid, and
   Output & Safety
 - Shows an always-visible planned-run summary with comparison cells, reference,
-  model count, total generations, and the active Standard/Extreme limits
+  model count, the Forge Batch Count multiplier, and active Standard/Extreme limits
 - Writes completed cells to disk instead of retaining decoded images in RAM
 - Builds labeled row strips on disk before composing the final matrix
 - Can unload the checkpoint, text encoder, and VAE before matrix construction
@@ -73,6 +73,12 @@ affiliated with or endorsed by OpenAI.
 - Optionally runs exactly one LoRA or the unchanged prompt across up to 25 checkpoints
   normally or 150 in Extreme Run Mode, strictly sequentially with a complete unload
   between model jobs
+- Filters multi-model checkpoints by non-empty Forge model folders, with optional
+  subfolder inclusion and manual selection across the complete checkpoint inventory
+- Honors Forge **Batch Count** in current-model and multiple-model modes as distinct
+  seed rounds while keeping every comparison cell aligned to the same seed per round
+- Lets users organize one shared multi-model overview either by model rows with seed
+  rounds as columns (the default) or in seed-first order with models grouped per round
 
 ## Requirements
 
@@ -95,17 +101,18 @@ The **LoRA / Embedding Tester** accordion is available in both txt2img and img2i
    Embedding, then select the folder, tested items, global weights, and optional
    per-item overrides. The relevant inventory loads on first activation.
 2. In **2. Models & Run Size**, keep **Current model only** for the established
-   workflow or choose a sequential multiple-model mode and its checkpoints. Enable
-   **Extreme Run Mode** only above 500 cells per model or 25 checkpoints.
+   workflow or choose a sequential multiple-model mode, a checkpoint folder, its
+   checkpoints, and the shared-overview organization. Enable **Extreme Run Mode** only
+   above 500 cells per model or 25 checkpoints.
 3. In **3. Grid**, configure the repeated reference, legend, per-item grids,
    combined overview, layout, columns, and margin. The reference is enabled by
    default and repeated on every page.
 4. In **4. Output & Safety**, choose whether to retain individual images and keep
    the recommended complete model unload enabled for matrix construction.
 5. Check the always-visible **Planned run** line below the tabs. It reports the
-   comparison/reference cells per model, selected model count, total generations,
-   and active Standard or Extreme limits. Invalid or incomplete settings are shown
-   there before generation.
+   comparison/reference cells per model, selected model count, the Batch Count
+   multiplier, and active Standard or Extreme limits. The exact expanded generation
+   count is logged when generation starts.
 6. Generate normally. Per-item pages are returned first; an enabled combined matrix
    follows them.
 
@@ -121,7 +128,10 @@ accordion leaves normal Forge generation unchanged.
 ### Multiple models
 
 The **2. Models & Run Size** tab is optional. Its default **Current model only** mode
-preserves the existing tester behavior. Two additional modes are available:
+preserves the existing tester behavior. For either multiple-model mode, choose a
+checkpoint folder to select every model in that scope, optionally including nested
+folders, or keep **Manual selection** to choose individual checkpoints across Forge's
+complete inventory. Two additional modes are available:
 
 - **One LoRA across selected models** requires **LoRA** under **What should be
   tested?**, exactly one selected LoRA, one shared weight or weight range, and up to
@@ -130,6 +140,34 @@ preserves the existing tester behavior. Two additional modes are available:
   no-op comparison case so the same fixed seed, disk spooling, matrix creation, and
   recovery path are reused without creating or loading an empty LoRA file.
 
+Forge **Batch Count** is applied to Current model and both multiple-model modes. For
+example, Batch Count `3` with starting seed `42` creates seed rounds `42`, `43`, and
+`44`; each round uses its seed consistently across every reference, LoRA, weight, and
+selected checkpoint. With Forge seed variation enabled, the main seed remains fixed
+and the subseed advances as Forge normally does. Each seed round receives independently
+labeled matrix output, and the multiplied cells count toward the Standard/Extreme
+per-model limit before generation starts. The planned-run line shows a Batch Count
+multiplier; the exact expanded generation count is logged when generation starts.
+
+**Shared overview organization** controls only the final overview; generation,
+persistence, unload, and restoration stay identical:
+
+- **Models first — seed rounds as columns** is the default. Each model occupies a row,
+  and its seed rounds appear left to right, making it easy to scan the same seed column
+  down all models.
+- **Seeds first — models grouped by seed round** keeps the same shared overview but
+  renders one labeled row per seed. The seed appears once in a dedicated left column,
+  followed by the selected model results as columns. The ordinary Matrix Columns
+  setting cannot mix the next seed into that row.
+
+Any overview page that contains multiple seeds uses `-1` as its single summary seed
+and records the complete seed/subseed list in its PNG information and recovery
+manifest. A safety-split page containing only one seed keeps that exact seed/subseed.
+
+**Batch Size** remains serialized to `1` for disk-spooling and recovery safety. A
+larger Forge Batch Size is not multiplied into the run; use Batch Count for multiple
+images per current model or checkpoint.
+
 Each selected checkpoint runs as a complete Forge processing job. After its pages are
 persisted, LoRA Tester releases processing references and calls Forge's complete
 checkpoint unload path before starting the next checkpoint. The originally selected
@@ -137,8 +175,12 @@ checkpoint and additional modules are restored in a `finally` path. Completed mo
 pages survive a later model failure or interruption, and a recovery manifest records
 the per-model result. If a full unload fails, the sequence stops before another model
 is loaded. After the sequential jobs finish, their labeled per-model pages are combined
-into one shared comparison grid. The normal matrix dimension and pixel limits remain
-active and split that overview only when a single safe page is impossible.
+according to the selected shared-overview organization. The normal matrix dimension
+and pixel limits remain active and split an overview only when a single safe page is
+impossible. Forge's progress total covers every selected checkpoint and seed round.
+After a complete run and validated shared overview, extension-owned temporary
+per-model grids are removed; failures and interruptions retain them with the recovery
+manifest, and user-saved Forge grids are never treated as temporary sources.
 
 Model-family preflight is deliberately not part of this first implementation. Forge
 therefore remains the authority: an incompatible checkpoint/LoRA combination may fail
@@ -176,9 +218,11 @@ No second encoder or model is loaded.
 
 ## Folder and table behavior
 
-Only folders containing at least one LoRA are offered. Direct files appear before
-nested folder groups. **Include subfolders** determines whether a folder selection
-also contains its descendants.
+Only folders containing at least one relevant item are offered for LoRAs, Embeddings,
+and multi-model checkpoints. Direct files appear before nested folder groups.
+**Include subfolders** determines whether a folder selection also contains its
+descendants. Checkpoint discovery and identity remain Forge-owned; the extension only
+filters Forge's relative checkpoint paths for selection.
 
 Both settings tables contain the identifier, trigger, and Min/Max/Step weight columns:
 
@@ -250,8 +294,9 @@ LoRA tag. The batch log reports the resolved trigger text and position.
 
 Forge normally increments a seed across iterations. LoRA Tester rebuilds Forge's
 per-iteration random-number generator before every cell so that all LoRA/weight or
-Embedding/weight combinations use the seed of the first generated image. This
-preserves a meaningful visual comparison.
+Embedding/weight combinations within one Batch Count round use the same resolved
+seed. Later rounds follow Forge's normal sequential seed/subseed progression. This
+preserves a meaningful visual comparison both within and across rounds.
 
 ## Memory and page safeguards
 
@@ -321,12 +366,18 @@ grid output directory and format. Otherwise, gallery pages remain in the run's
 temporary directory. On matrix failure, available row strips or source cells are
 returned as recovery output and the recovery location is logged.
 
+For multiple-model runs, successfully combined per-model pages are tracked separately.
+Only extension-owned pages inside the LoRA Tester spool root are removed after the
+shared overview and model restoration both succeed. Saved Forge grids are preserved;
+partial runs keep temporary pages and the recovery manifest.
+
 ## Troubleshooting
 
 ### The LoRA list is empty
 
 - Close and reopen the accordion or click **Refresh LoRA List**.
-- Confirm that files are below Forge's configured LoRA directory.
+- Confirm that files are below Forge's primary `lora_dir` or one of its configured
+  additional `lora_dirs` roots.
 - Supported extensions are `.safetensors`, `.ckpt`, and `.pt`.
 
 ### Trigger words are missing
